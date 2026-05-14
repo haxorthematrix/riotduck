@@ -1,0 +1,31 @@
+# Example emitter profile for the synthetic SDR backend.
+#
+# Use with:   riotduck scan --fake 1 --fake-profile config/fake_profile.yaml
+#
+# Each entry is an Emitter (see src/riotduck/sdr/fake.py).
+# Amplitudes are linear (1.0 == full scale); the synthetic noise floor
+# sits ~-80 dBFS, so amp=0.3 ≈ -10 dBFS, amp=0.05 ≈ -26 dBFS.
+
+emitters:
+  # Persistent narrowband carrier in the 433 ISM band — the "rogue
+  # transmitter" that should be flagged with a disappearance if you
+  # remove it from the profile.
+  - kind: carrier
+    hz:   433.500e+6
+    amp:  0.25
+
+  # Keyfob-style short burst, ~30 ms every 3 s at 433.92 MHz. Should
+  # appear and disappear repeatedly; useful for testing re-observation
+  # / dedup logic.
+  - kind: burst
+    hz:        433.920e+6
+    amp:       0.6
+    period_s:  3.0
+    duty:      0.01
+
+  # Drifting FPV-style transmitter wandering ±4 MHz around 2.44 GHz.
+  - kind:            drift
+    hz:              2.440e+9
+    amp:             0.3
+    drift_hz:        4.0e+6
+    drift_period_s:  20.0

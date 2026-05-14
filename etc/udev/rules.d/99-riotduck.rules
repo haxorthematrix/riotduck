@@ -1,0 +1,20 @@
+# Sample udev rules for riotduck.
+# Copy to /etc/udev/rules.d/ and run `sudo udevadm control --reload`.
+#
+# These give the `plugdev` group access to RTL-SDR and HackRF devices
+# so you don't need to run riotduck as root. Adjust GROUP= to match
+# your distro (e.g., `dialout`, `usbusers`).
+
+# RTL-SDR (RTL2832U + Realtek variants)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0660", GROUP="plugdev"
+
+# HackRF One (Great Scott Gadgets)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="cc15", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="6089", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", ATTRS{idProduct}=="000c", MODE="0660", GROUP="plugdev"
+
+# Add yourself to the plugdev group:
+#     sudo usermod -aG plugdev $USER
+# Then log out + back in.

@@ -1,0 +1,127 @@
+# Predefined RF allocations for riotduck.
+#
+# These are convenience presets; reference them from your user config with:
+#
+#   ranges:
+#     - use: ism_433
+#       overrides:
+#         bin_hz: 2000
+#         short_burst: true
+#
+# Frequencies are in Hz. Allocations follow common regional usage; verify
+# against your local regulator before relying on these for compliance.
+
+ranges:
+  - name: ism_433
+    f_start: 433.05e+6
+    f_end:   434.79e+6
+    bin_hz:  4000
+    short_burst: true
+    description: "ITU Region 1 ISM / US Part 15 — fobs, weather, garage doors"
+
+  - name: ism_315
+    f_start: 314.0e+6
+    f_end:   316.0e+6
+    bin_hz:  2000
+    short_burst: true
+    description: "NA OEM remotes, TPMS, low-end fobs"
+
+  - name: ism_868
+    f_start: 863.0e+6
+    f_end:   870.0e+6
+    bin_hz:  10000
+    description: "ITU Region 1 SRD; LoRa EU; alarm sensors"
+
+  - name: ism_902_928
+    f_start: 902.0e+6
+    f_end:   928.0e+6
+    bin_hz:  20000
+    description: "US/CA ISM; LoRa US, Z-Wave US, FHSS telemetry"
+
+  - name: ism_2400
+    f_start: 2400.0e+6
+    f_end:   2483.5e+6
+    bin_hz:  100000
+    description: "Wi-Fi 2.4, Bluetooth, Zigbee, FPV drones"
+
+  - name: ism_5800
+    f_start: 5725.0e+6
+    f_end:   5875.0e+6
+    bin_hz:  200000
+    description: "Wi-Fi 5G upper, drone video links"
+
+  - name: pmr446
+    f_start: 446.0e+6
+    f_end:   446.2e+6
+    bin_hz:  6250
+    description: "European unlicensed handhelds"
+
+  - name: frs_gmrs
+    f_start: 462.5625e+6
+    f_end:   467.725e+6
+    bin_hz:  6250
+    description: "NA FRS / GMRS handhelds"
+
+  - name: marine_vhf
+    f_start: 156.0e+6
+    f_end:   162.025e+6
+    bin_hz:  6250
+    description: "Marine VHF FM"
+
+  - name: aviation_air
+    f_start: 118.0e+6
+    f_end:   137.0e+6
+    bin_hz:  8333
+    description: "Aviation AM voice"
+
+  - name: airband_acars
+    f_start: 131.5e+6
+    f_end:   131.9e+6
+    bin_hz:  2500
+    description: "ACARS data sub-band"
+
+  - name: keyfobs_315
+    f_start: 314.75e+6
+    f_end:   315.25e+6
+    bin_hz:  2000
+    short_burst: true
+    description: "NA car/garage fobs around 315 MHz"
+
+  - name: keyfobs_433
+    f_start: 433.67e+6
+    f_end:   434.17e+6
+    bin_hz:  2000
+    short_burst: true
+    description: "EU/aftermarket fobs around 433.92 MHz"
+
+  - name: tpms_315
+    f_start: 314.75e+6
+    f_end:   315.25e+6
+    bin_hz:  2000
+    short_burst: true
+    description: "NA tire pressure sensors"
+
+  - name: tpms_433
+    f_start: 433.67e+6
+    f_end:   434.17e+6
+    bin_hz:  2000
+    short_burst: true
+    description: "EU tire pressure sensors"
+
+  - name: weather_sondes
+    f_start: 400.15e+6
+    f_end:   406.0e+6
+    bin_hz:  5000
+    description: "Radiosondes (Vaisala, M10, iMet)"
+
+  - name: pagers_pocsag_lo
+    f_start: 138.0e+6
+    f_end:   174.0e+6
+    bin_hz:  12500
+    description: "VHF paging (POCSAG/FLEX subset)"
+
+  - name: pagers_pocsag_hi
+    f_start: 929.0e+6
+    f_end:   932.0e+6
+    bin_hz:  12500
+    description: "UHF paging (POCSAG/FLEX)"

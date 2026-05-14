@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "riotduck"
+version = "0.1.0"
+description = "SDR-based RF baseline + anomaly detection system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Larry" }]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pyyaml>=6.0",
+    "pydantic>=2.6",
+    "click>=8.1",
+    "loguru>=0.7",
+    "aiohttp>=3.9",        # webhook sink
+    "rich>=13.7",          # nicer CLI tables
+]
+
+[project.optional-dependencies]
+soapy = []                 # SoapySDR is installed from the system package; placeholder
+rtlsdr = ["pyrtlsdr>=0.3"] # fallback if SoapySDR is unavailable
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.9",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+riotduck = "riotduck.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/riotduck"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

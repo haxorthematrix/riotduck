@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# data
+captures/
+baselines/
+*.cf32
+*.npz
+*.png
+*.jsonl
+riotduck.db
+riotduck.db-journal
+
+# editor
+.vscode/
+.idea/
+*.swp
+
+# misc
+.DS_Store
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

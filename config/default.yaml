@@ -1,0 +1,50 @@
+# Default riotduck user config.
+#
+# Copy to ~/.config/riotduck/config.yaml and edit, or pass with --config.
+# See specification.md §13 for the full schema.
+
+# Leave devices empty to auto-discover and use whatever's plugged in.
+# Once you have specific serials, pin them here with explicit roles.
+devices: []
+#   - serial: "00000001"
+#     type:   rtlsdr
+#     role:   scan
+#     antenna: discone
+
+ranges:
+  - use: ism_433
+    overrides:
+      short_burst: true
+  - use: ism_902_928
+
+detection:
+  k_up: 8
+  k_down: 3
+  n_up: 3
+  n_down: 5
+  warmup_min: 60
+  window_size: 300
+
+orchestrator:
+  pause_for_analysis: auto
+  re_observation_s: 30
+  capture_ms: 500
+
+identification:
+  rtl_433:
+    enabled: true
+    binary: rtl_433
+  urh:
+    enabled: true
+    binary: urh_cli
+  min_confidence: 0.7
+
+notify:
+  - sink: stdout
+  - sink: jsonl
+    path: events.jsonl
+
+storage:
+  db_path: riotduck.db
+  captures_dir: captures
+  baselines_dir: baselines
