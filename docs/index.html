@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>riotduck — RF baseline & anomaly detection</title>
+  <meta name="description" content="SDR-based RF baseline and anomaly detection. Sweep with an RTL-SDR or HackRF, detect emitters appearing and disappearing, capture I/Q, fingerprint with rtl_433.">
+  <meta name="theme-color" content="#0a1118">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="riotduck">
+  <meta property="og:description" content="SDR-based RF baseline and anomaly detection — knows what's normal on your spectrum and tells you the moment it changes.">
+  <meta property="og:url" content="https://riotduck.io/">
+  <meta property="og:image" content="https://riotduck.io/logo.svg">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="riotduck">
+  <meta name="twitter:description" content="SDR-based RF baseline and anomaly detection.">
+
+  <link rel="icon" type="image/svg+xml" href="logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <nav class="topnav">
+    <a href="/" class="wordmark">
+      <img src="logo.svg" alt="" aria-hidden="true">
+      <span>riot<span class="dot">duck</span></span>
+    </a>
+    <a href="https://github.com/haxorthematrix/riotduck" class="nav-link">GitHub →</a>
+  </nav>
+
+  <header class="hero">
+    <img src="logo.svg" alt="riotduck logo — duck silhouette with concentric radio waves" class="hero-logo">
+    <h1>The quiet watcher of the airwaves.</h1>
+    <p class="tagline">
+      An <span class="accent">SDR-based</span> RF baseline and anomaly detector. riotduck learns what's
+      normal on your spectrum — and tells you the moment something
+      <span class="accent">appears</span> or <span class="accent">disappears</span>.
+    </p>
+    <div class="cta-row">
+      <a href="#quickstart" class="cta primary">Quick start</a>
+      <a href="https://github.com/haxorthematrix/riotduck" class="cta secondary">View on GitHub →</a>
+    </div>
+  </header>
+
+  <section class="features">
+    <div class="feature">
+      <span class="feature-icon">↑</span>
+      <h3>Appearance</h3>
+      <p>A new transmitter pops up where the band was quiet — a rogue beacon, a covert implant, an FPV drone, a wireless camera that wasn't there last week. riotduck flags it within sweeps.</p>
+    </div>
+    <div class="feature amber">
+      <span class="feature-icon">↓</span>
+      <h3>Disappearance</h3>
+      <p>The other half no one watches for. An emitter you've been tracking goes silent. A persistent signal loses power. A covert transmitter you placed gets removed. You hear about it.</p>
+    </div>
+    <div class="feature">
+      <span class="feature-icon">⌖</span>
+      <h3>Identification</h3>
+      <p>On appearance, riotduck captures I/Q to <code>.cf32</code> and hands it to <code>rtl_433</code> for fingerprinting against ~250 device classes. URH demod and unknown-signal analysis sit on the same bus.</p>
+    </div>
+  </section>
+
+  <section id="quickstart" class="quickstart">
+    <h2>Try it without an SDR</h2>
+    <p class="sub">A synthetic SDR backend ships with the project — real complex64 I/Q, real detections, no hardware. The full scanner → baseline → dedup → capture → fingerprint pipeline runs end-to-end.</p>
+    <pre><code>git clone https://github.com/haxorthematrix/riotduck.git
+cd riotduck
+pip install -e .
+riotduck scan --fake 1 --config config/default.yaml</code></pre>
+
+    <div class="terminal" aria-hidden="true">
+      <div class="titlebar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span style="margin-left: 8px;">~/riotduck — riotduck scan</span>
+      </div>
+      <div class="body"><span class="ts">[detection.appearance]</span>    <span class="topic">^</span> ism_433 @ 433.9200 MHz  bw=10.0 kHz  snr=68.5 dB  id=<span class="id">a1b2c3d4</span>
+<span class="ts">[detection.disappearance]</span> <span class="down">v</span> ism_433 @ 433.9200 MHz  bw=10.0 kHz  snr= 0.4 dB  id=<span class="id">a1b2c3d4</span>
+<span class="ts">[detection.appearance]</span>    <span class="topic">^</span> ism_433 @ 433.9200 MHz  bw=10.0 kHz  snr=68.5 dB  id=<span class="id">a1b2c3d4</span>
+<span class="ts">[identification]</span>          ID rtl_433: Acurite-Tower  conf=1.00  det=<span class="id">a1b2c3d4</span></div>
+    </div>
+
+    <p class="caption">Repeat detections at the same frequency share an event id — the dedup tracker working. Set <code>RIOTDUCK_FAKE_DEVICES=2</code> to exercise multi-device discovery.</p>
+  </section>
+
+  <section class="how">
+    <h2>How it works</h2>
+    <p class="sub">Five stages on an in-process async bus. Each stage is its own module and is unit-tested without hardware.</p>
+    <div class="pipeline">
+      <span class="step">Sweep</span><span class="arrow">→</span>
+      <span class="step">Baseline</span><span class="arrow">→</span>
+      <span class="step">Detect</span><span class="arrow">→</span>
+      <span class="step alt">Capture</span><span class="arrow">→</span>
+      <span class="step alt">Identify</span>
+    </div>
+    <ul>
+      <li>Step-tune sweep with windowed FFT; decimate to user bin width; usable-bandwidth crop avoids LO and DC spurs.</li>
+      <li>Per-bin rolling <code>median</code> / <code>MAD</code> baseline; global P10 noise floor robust to strong emitters in-band.</li>
+      <li>Two-criterion appearance trigger; <code>n_up</code> / <code>n_down</code> hysteresis; coalescing into events.</li>
+      <li>Re-observation tracker folds repeat bursts at the same frequency into one logical event.</li>
+      <li>Inline capture on detection writes I/Q as <code>.cf32</code>, day-partitioned under <code>captures/</code>.</li>
+      <li>FingerprintAgent runs <code>rtl_433</code> against the capture and publishes <code>identification</code> events.</li>
+    </ul>
+  </section>
+
+  <section class="hardware">
+    <h2>Hardware</h2>
+    <p class="sub">SoapySDR-first, with a pyrtlsdr fallback. The synthetic backend is built in for hardware-free testing.</p>
+    <div class="hardware-grid">
+      <div class="hardware-card">
+        <h4>Supported today</h4>
+        <ul>
+          <li>RTL-SDR (R820T2 + variants)</li>
+          <li>HackRF One</li>
+          <li>Synthetic SDR (built-in)</li>
+        </ul>
+      </div>
+      <div class="hardware-card">
+        <h4>Drops in next</h4>
+        <ul>
+          <li>Airspy / SDRplay / LimeSDR / USRP — via SoapySDR</li>
+          <li>HackRF sweep fast path for multi-GHz ranges</li>
+          <li>Multi-SDR orchestration: one sweeps while another analyzes</li>
+        </ul>
+      </div>
+      <div class="hardware-card">
+        <h4>Notifications</h4>
+        <ul>
+          <li>stdout — terminal-friendly events</li>
+          <li>jsonl — durable, rotatable</li>
+          <li>webhook — POST JSON to anything</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      <a href="https://github.com/haxorthematrix/riotduck">github.com/haxorthematrix/riotduck</a>
+      <span class="dot">·</span>
+      <a href="https://github.com/haxorthematrix/riotduck/blob/main/specification.md">specification</a>
+      <span class="dot">·</span>
+      <a href="https://github.com/haxorthematrix/riotduck/blob/main/README.md">README</a>
+      <span class="dot">·</span>
+      MIT
+    </p>
+  </footer>
+
+</body>
+</html>

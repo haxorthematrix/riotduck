@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="riotduck">
+  <title>riotduck</title>
+  <defs>
+    <radialGradient id="rd-glow" cx="50%" cy="55%" r="55%">
+      <stop offset="0%" stop-color="#3df58a" stop-opacity="0.18"/>
+      <stop offset="70%" stop-color="#3df58a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- ambient glow -->
+  <circle cx="128" cy="140" r="120" fill="url(#rd-glow)"/>
+
+  <!-- radar / radio wave arcs -->
+  <g fill="none" stroke="#3df58a" stroke-linecap="round">
+    <path d="M 58 140 Q 128 50 198 140" stroke-width="6" opacity="0.95"/>
+    <path d="M 36 152 Q 128 18 220 152" stroke-width="5" opacity="0.55"/>
+    <path d="M 14 164 Q 128 -16 242 164" stroke-width="4" opacity="0.28"/>
+  </g>
+
+  <!-- detection blip on the outer arc -->
+  <g>
+    <circle cx="208" cy="110" r="10" fill="#fbbf24" opacity="0.22"/>
+    <circle cx="208" cy="110" r="4.5" fill="#fbbf24"/>
+  </g>
+
+  <!-- duck silhouette -->
+  <g fill="#e2e8f0">
+    <!-- tail tuft (back/left) -->
+    <path d="M 54 178 L 38 168 L 50 196 Z"/>
+    <!-- body -->
+    <ellipse cx="118" cy="190" rx="62" ry="34"/>
+    <!-- head -->
+    <circle cx="160" cy="158" r="24"/>
+  </g>
+  <!-- beak (amber) -->
+  <path d="M 180 152 L 206 154 L 206 168 L 180 166 Z" fill="#fbbf24"/>
+  <!-- eye -->
+  <circle cx="166" cy="153" r="3.2" fill="#0a1118"/>
+  <!-- subtle bill highlight -->
+  <rect x="180" y="158" width="26" height="2" fill="#0a1118" opacity="0.35"/>
+</svg>
