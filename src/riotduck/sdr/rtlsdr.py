@@ -125,7 +125,13 @@ class SoapyRTLBackend(SDRBackend):
 # ---------- pyrtlsdr-backed fallback ----------
 
 try:
-    from rtlsdr import RtlSdr  # type: ignore
+    import warnings as _warnings
+
+    # pyrtlsdr 0.3.x emits a setuptools/pkg_resources deprecation
+    # warning at import time. Mute it so terminal output stays clean.
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings("ignore", category=UserWarning, module="rtlsdr")
+        from rtlsdr import RtlSdr  # type: ignore
 
     _HAS_PYRTL = True
 except Exception:
@@ -155,10 +161,30 @@ class _PyRTLSession(SDRSession):
         else:
             self._dev.gain = float(val)
 
+    # pyrtlsdr's read_samples() issues one libusb sync transfer per call
+    # and does no internal chunking. Two real constraints:
+    #   1. Large reads trip LIBUSB_ERROR_OVERFLOW.
+    #   2. Unaligned read sizes (not a multiple of 16384 BYTES, i.e.
+    #      8192 samples) trip the same overflow on librtlsdr 2.x.
+    # We always request _READ_CHUNK samples per call and trim what we
+    # don't need on the last iteration. _READ_CHUNK is a multiple of
+    # 8192 so alignment is preserved.
+    _READ_CHUNK = 131_072
+
     def read_iq(self, n_samples: int) -> np.ndarray:
-        samples = self._dev.read_samples(n_samples)
-        # pyrtlsdr returns complex128; downcast for memory.
-        return np.asarray(samples, dtype=np.complex64)
+        if n_samples <= 0:
+            return np.empty(0, dtype=np.complex64)
+        out = np.empty(n_samples, dtype=np.complex64)
+        offset = 0
+        while offset < n_samples:
+            samples = self._dev.read_samples(self._READ_CHUNK)
+            arr = np.asarray(samples, dtype=np.complex64)
+            if arr.size == 0:
+                break
+            take = min(arr.size, n_samples - offset)
+            out[offset : offset + take] = arr[:take]
+            offset += take
+        return out[:offset]
 
     def close(self) -> None:
         try:
@@ -174,21 +200,25 @@ class PyRTLBackend(SDRBackend):
         out: list[DeviceInfo] = []
         if not _HAS_PYRTL:
             return out
-        # pyrtlsdr's enumeration is index-only; we report by index.
+        # pyrtlsdr ≥ 0.3 dropped `get_device_count`; serial addresses
+        # is the canonical enumeration entry point. Older versions
+        # exposed `get_device_count` — we fall back to it if present.
+        serials: list[str] = []
         try:
-            count = RtlSdr.get_device_count()  # type: ignore[attr-defined]
+            serials = list(RtlSdr.get_device_serial_addresses())  # type: ignore[attr-defined]
         except Exception:
-            count = 0
-        for i in range(count):
             try:
-                serial = RtlSdr.get_device_serial_addresses()[i]  # type: ignore[attr-defined]
+                count = RtlSdr.get_device_count()  # type: ignore[attr-defined]
+                serials = [str(i) for i in range(count)]
             except Exception:
-                serial = str(i)
+                serials = []
+        for i, raw_serial in enumerate(serials):
+            serial = raw_serial or str(i)
             out.append(
                 DeviceInfo(
                     serial=serial,
                     type="rtlsdr",
-                    label=f"rtlsdr#{i}",
+                    label=f"rtlsdr#{i} ({serial})",
                     driver=self.name,
                     tuning_range_hz=(24e6, 1.766e9),
                     samp_rates=(225e3, 1.024e6, 1.4e6, 1.8e6, 1.92e6, 2.048e6, 2.4e6, 2.56e6),
@@ -201,12 +231,20 @@ class PyRTLBackend(SDRBackend):
     def open(self, serial: str) -> SDRSession:
         if not _HAS_PYRTL:
             raise RuntimeError("pyrtlsdr not available")
-        # pyrtlsdr accepts either an index or a serial string.
+        dev = None
+        # pyrtlsdr 0.3.x: open by index using the serial→index lookup.
         try:
-            dev = RtlSdr(serial_number=serial)
-        except TypeError:
-            # older pyrtlsdr versions don't have serial_number kwarg
-            dev = RtlSdr(int(serial)) if serial.isdigit() else RtlSdr()
+            idx = RtlSdr.get_device_index_by_serial(serial)  # type: ignore[attr-defined]
+            if idx is not None and idx >= 0:
+                dev = RtlSdr(device_index=idx)
+        except Exception:
+            dev = None
+        if dev is None:
+            # Older pyrtlsdr versions exposed serial_number directly.
+            try:
+                dev = RtlSdr(serial_number=serial)
+            except TypeError:
+                dev = RtlSdr(int(serial)) if serial.isdigit() else RtlSdr()
         info = DeviceInfo(
             serial=serial,
             type="rtlsdr",

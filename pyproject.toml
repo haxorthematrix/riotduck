@@ -23,7 +23,13 @@ dependencies = [
 
 [project.optional-dependencies]
 soapy = []                 # SoapySDR is installed from the system package; placeholder
-rtlsdr = ["pyrtlsdr>=0.3"] # fallback if SoapySDR is unavailable
+rtlsdr = [
+    # 0.4.0 hard-imports rtlsdr_set_dithering which only exists in
+    # the rtlsdrblog fork of librtlsdr, not stock Osmocom librtlsdr.
+    "pyrtlsdr>=0.3,<0.4",
+    # pyrtlsdr 0.3.x uses pkg_resources, which setuptools 81 dropped.
+    "setuptools<81",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
