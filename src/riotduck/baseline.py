@@ -197,6 +197,10 @@ class BaselineEngine:
                     self._times,
                 )
 
+        if self.detect_cfg.cluster_suppression:
+            appearances = _suppress_shadowed(appearances, self.detect_cfg)
+            disappearances = _suppress_shadowed(disappearances, self.detect_cfg)
+
         return appearances + disappearances
 
     def snapshot(self) -> dict[str, np.ndarray]:
@@ -213,6 +217,62 @@ class BaselineEngine:
             "ring_filled": np.array([self._ring_filled], dtype=np.int64),
             "ts": np.array([time.time()]),
         }
+
+
+def _shadow_radius_hz(detection: Detection, cfg: DetectionConfig) -> float:
+    """How far a detection's sidelobes plausibly extend, in Hz.
+
+    Zero if the detection is too weak to plausibly cause artifacts
+    in neighboring bins. Otherwise scales linearly with SNR.
+    """
+    if detection.snr_db < cfg.cluster_shadow_min_snr_db:
+        return 0.0
+    return max(
+        cfg.cluster_shadow_base_hz,
+        detection.snr_db * cfg.cluster_shadow_per_db_hz,
+    )
+
+
+def _suppress_shadowed(
+    detections: list[Detection], cfg: DetectionConfig
+) -> list[Detection]:
+    """Drop detections that fall inside an earlier (stronger) detection's
+    shadow zone.
+
+    Algorithm: sort by SNR descending; for each detection in order,
+    keep it iff no already-kept detection's shadow contains its
+    center frequency. Then accumulate its own shadow.
+
+    This is one-way: a weaker detection can be shadowed by a stronger
+    one, but never the reverse. Detections at the same SNR are
+    processed in original order (the first-listed wins).
+    """
+    if len(detections) <= 1:
+        return detections
+    # Sort by descending SNR; stable so equal-SNR keeps original order.
+    order = sorted(
+        range(len(detections)),
+        key=lambda i: detections[i].snr_db,
+        reverse=True,
+    )
+    kept_indices: list[int] = []
+    kept_centers: list[float] = []
+    kept_radii: list[float] = []
+    for i in order:
+        d = detections[i]
+        suppressed = False
+        for c, r in zip(kept_centers, kept_radii):
+            if r > 0 and abs(d.center_hz - c) <= r:
+                suppressed = True
+                break
+        if suppressed:
+            continue
+        kept_indices.append(i)
+        kept_centers.append(d.center_hz)
+        kept_radii.append(_shadow_radius_hz(d, cfg))
+    # Preserve the original list order among the kept detections.
+    keep = set(kept_indices)
+    return [d for i, d in enumerate(detections) if i in keep]
 
 
 def _coalesce(

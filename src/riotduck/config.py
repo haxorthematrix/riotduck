@@ -93,6 +93,24 @@ class DetectionConfig(BaseModel):
     presence_threshold: float = 0.8       # PRESENT-at-warmup fraction
     min_freq_tolerance_hz: float = 5000.0  # floor on dedup freq tolerance
 
+    # ---- bin-cluster (sidelobe) suppression ----
+    #
+    # A strong appearance often triggers weaker detections in
+    # adjacent bins from FFT sidelobes, IQ imbalance images, tuner
+    # spurs, and OOK-sideband artifacts. When enabled, the engine
+    # sorts each sweep's detections by SNR (descending) and drops
+    # any detection that lands within an earlier (stronger)
+    # detection's "shadow zone".
+    #
+    # Shadow radius for a detection D = max(base_hz, D.snr_db *
+    # per_db_hz). Detections with SNR below the threshold cast no
+    # shadow, so two adjacent moderate-strength emitters are NOT
+    # cross-suppressed.
+    cluster_suppression: bool = True
+    cluster_shadow_min_snr_db: float = 25.0
+    cluster_shadow_base_hz: float = 20_000.0
+    cluster_shadow_per_db_hz: float = 4_000.0
+
 
 class OrchestratorConfig(BaseModel):
     pause_for_analysis: Literal["auto", True, False] = "auto"
