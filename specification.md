@@ -1,9 +1,10 @@
 # riotduck — RF Anomaly Detection System
 
-**Status:** v0.1 — Phases 1, 2, and the start of Phase 4 in. Validated on
-real RTL-SDR hardware end-to-end.
+**Status:** v0.1 — Phases 1, 2, the start of Phase 4, and the user
+fingerprint library are in. Validated on real RTL-SDR hardware
+end-to-end.
 **Owner:** Larry
-**Date:** 2026-05-14
+**Date:** 2026-05-15
 
 ### At a glance
 
@@ -23,20 +24,27 @@ What works today:
   post-burst noise.
 - I/Q captures written as `.cf32`, day-partitioned under
   `captures/YYYY-MM-DD/<detection_id>.cf32`.
-- rtl_433 fingerprint pipeline: subprocess wrapper, async
-  FingerprintAgent, identification events on the bus.
-- **Unknown-signal analyzer agent**: when rtl_433 returns "no
-  match", the analyzer characterizes the signal — burst
-  segmentation, bandwidth at -3/-6/-20 dB, modulation classification
-  (CW / OOK / FSK / FM), symbol-rate via edge-spacing. Publishes
-  `AnalysisReport` on the bus.
+- **Three-stage identification stack** (see §7):
+  - **rtl_433** subprocess wrapper + async FingerprintAgent for
+    known protocols.
+  - **Unknown-signal analyzer agent** for rtl_433 misses — burst
+    segmentation, bandwidth at -3/-6/-20 dB, modulation
+    classification (CW/OOK/FSK/FM), symbol-rate via edge-spacing.
+  - **User fingerprint library**: YAML file of operator-curated
+    entries matched against the analyzer's output. Hits publish a
+    second `Identification(source="library")`; misses include a
+    paste-ready candidate YAML block in the report.
 - Notification sinks: stdout, JSONL, webhook. Single-drain-per-
-  subscription pattern (a bug where `identification` events were
-  being silently dropped was caught + fixed).
+  subscription pattern (regression-tested against a previous bug
+  where `identification` events were silently dropped).
 - Synthetic SDR backend with configurable emitters — the full
   pipeline runs end-to-end without hardware.
-- CLI: `scan`, `devices`, `ranges`, `doctor`, `capture`, `analyze`.
-- 65 unit tests, all passing, no hardware required.
+- `riotduck doctor` performs a real version check on rtl_433 and
+  detects alternative installs (PATH shadows + Homebrew copies that
+  haven't been symlinked into PATH).
+- CLI: `scan`, `devices`, `ranges`, `doctor`, `capture`, `analyze`,
+  `library list/show`.
+- **101 unit tests**, all passing, no hardware required.
 
 What's deferred:
 
@@ -46,7 +54,14 @@ What's deferred:
   stub (Phase 3).
 - Multi-SDR orchestration with dedicated CaptureAgent and dynamic
   device reassignment (Phase 4). Today, one ScannerAgent per device
-  sweeps every range and captures inline; dedup is per-agent.
+  sweeps every range and captures inline; dedup is per-agent and
+  library lookup is per-agent.
+- PSK distinguishing in the modulation classifier (today lumped
+  into "FSK"/"unknown").
+- Capture sidecar metadata (`.meta.json` next to each `.cf32`) so
+  `analyze` / `replay` don't need command-line sample rate hints.
+- `riotduck library add/remove` subcommands (today users edit the
+  YAML by hand; `library list/show` are read-only).
 - SQLite event store (JSONL sink covers durable logging).
 - Persistent baselines across restarts.
 - Web dashboard (Phase 5).
@@ -452,26 +467,39 @@ When a short burst is detected:
 
 Order of attempts on a new appearance:
 
-1. **rtl_433 fingerprinting** — if the detection's center frequency is
-   within a band rtl_433 supports (low-VHF/UHF/433/868/915/etc), spawn
-   `rtl_433 -r <iq_path>` or, with a live SDR, `rtl_433 -f <center>`.
-   Parse JSON output. On a hit, emit an `Identification` event with
-   the decoded device class (e.g., `Acurite-Tower`, `LaCrosse-TX141`).
-2. **URH-style demod** — call out to `urh_cli` (or, in v2,
-   GNU-Radio-based custom flowgraph) to attempt automatic demodulation.
-   If a stable bit stream is recovered and matches a known
-   protocol-signature library (preamble + sync word + framing), emit
-   an `Identification` with `source: urh`.
-3. **Unknown-signal analysis** — see §8.
+1. **rtl_433 fingerprinting** — spawn `rtl_433 -F json -s <SR> -f
+   <center> -r <iq_path>` against the I/Q capture. Parse the JSON
+   output. On a hit, emit an `Identification` event with
+   `source="rtl_433"` and the decoded device class (e.g.,
+   `Acurite-Tower`, `LaCrosse-TX141`). On a miss, emit a sentinel
+   `Identification(source="rtl_433", device_class=None,
+   confidence=0.0)` so downstream stages know rtl_433 ran.
+2. **URH-style demod** *(Phase 3, stubbed)* — call `urh_cli` against
+   the same I/Q. If a stable bit stream matches a known protocol-
+   signature library, emit `Identification(source="urh")`. Today
+   this falls through to (3).
+3. **Unknown-signal analysis** (§8) — runs on every rtl_433 miss.
+   Produces an `AnalysisReport` with modulation, bandwidth, symbol
+   rate, frequency offset.
+4. **User fingerprint library** — alongside the AnalysisReport, the
+   analyzer agent looks up the extracted features in a YAML library
+   the operator curates. A hit publishes a second
+   `Identification(source="library")` with the entry's name and a
+   confidence score derived from how tight the criteria match. A
+   miss optionally attaches a paste-ready candidate YAML snippet to
+   the report's `notes` so adding a recognized emitter is one
+   copy/edit/save away. See `library.yaml` schema in §13.
 
-Steps (1) and (2) run from the I/Q capture in §6.3. Step (1) is
-preferred because rtl_433 is fast and high-precision for its supported
-device set. If a second SDR is free, step (2) can also be done live
-against the live emitter for additional captures.
+Steps (1) and (2) consume the I/Q capture written in §6.3. Steps (3)
+and (4) consume the analyzer's *features*, not the raw I/Q —
+extracting them once is cheap enough that they run unconditionally
+when (1) misses. If a second SDR is free, the orchestrator can also
+do a live tune for additional captures.
 
-Identifications include a confidence score (0..1). Sub-threshold
-matches (default < 0.7) are kept but flagged `low_confidence` and the
-pipeline still advances to deeper analysis.
+Identifications include a confidence score (0..1). Library hits use
+`1 - mean(d_i / tol_i)` across defined criteria; rtl_433 hits are
+1.0 today (rtl_433 itself doesn't surface confidence). Sub-threshold
+matches (default < 0.7) are kept but flagged `low_confidence`.
 
 ## 8. Unknown Signal Analysis
 
@@ -557,33 +585,52 @@ If multiple detections fire concurrently, jobs queue with priority:
 
 ## 11. Notifications
 
-Sinks implemented in v1:
+Sinks shipping today:
 
-- **stdout** — human-readable lines
-- **jsonl** — newline-delimited JSON to a file (rotated daily)
-- **webhook** — POST JSON to a URL, with retry + dead-letter
-- **syslog** — RFC5424 over UDP/TCP
+- **stdout** — human-readable lines, pretty-formats Detection,
+  Identification, and AnalysisReport payloads.
+- **jsonl** — newline-delimited JSON to a file. Daily rotation is
+  spec'd but not yet implemented; today the file grows unbounded.
+- **webhook** — POST JSON to a URL, one request per event.
 
-Each sink has a **filter** (severity, event types, frequency ranges).
-A sink may subscribe to: `detection.appearance`, `detection.disappearance`,
-`identification.*`, `analysis.report`, `device.*`, `error.*`.
+Deferred:
+
+- **syslog** — RFC5424 over UDP/TCP.
+- **MQTT / Slack / email** (Phase 5).
+- **Webhook retry + dead-letter queue.** Current implementation
+  fire-and-forgets; failures log a warning but don't requeue.
+
+Each sink has a **filter** (event types, ranges, min SNR). A sink
+subscribes to: `detection.appearance`, `detection.disappearance`,
+`identification`, `analysis.report`. The earlier sink-loop pattern
+that orphaned queue waiters and silently dropped events is fixed
+(now one drain task per subscription, regression-tested).
 
 ## 12. Storage
 
-- **SQLite** (`riotduck.db`) with tables:
-  - `devices` — discovered devices, last seen
-  - `ranges` — active range configurations
-  - `baselines` — periodic snapshots
-  - `detections` — every detection event
-  - `identifications` — fingerprint hits
-  - `analyses` — analyzer reports
-  - `captures` — paths + metadata to I/Q files
-- **Filesystem**:
-  - `captures/YYYY-MM-DD/<uuid>.cf32` — raw I/Q (complex float32)
-  - `captures/YYYY-MM-DD/<uuid>.png` — spectrogram
-  - `baselines/<range>/<ts>.npz` — full baseline snapshot
-- Retention policy is configurable (default: 14 days for I/Q, 90 days
-  for SQLite events).
+Today:
+
+- **Filesystem captures**: `captures/YYYY-MM-DD/<detection_id>.cf32`
+  — raw I/Q as complex float32, written by `storage/files.py` on
+  every appearance. The detection_id is also the event id over the
+  bus, so cross-referencing is direct.
+- **JSONL event log**: written by the `jsonl` notification sink.
+  Today this is the durable event store; SQLite is deferred.
+- **Library YAML**: operator-curated, path from `library.path` in
+  config. Read at startup.
+
+Deferred:
+
+- **SQLite event store** (`riotduck.db`) with tables for devices,
+  ranges, baselines, detections, identifications, analyses,
+  captures. JSONL covers the immediate need.
+- **Sidecar `<id>.meta.json`** next to each `.cf32` so offline
+  `analyze` / `replay` don't need command-line sample-rate hints.
+- **Spectrogram PNG** alongside each capture
+  (`captures/YYYY-MM-DD/<id>.png`).
+- **Baseline snapshots** (`baselines/<range>/<ts>.npz`).
+- **Retention policy** (spec'd default: 14 days for I/Q, 90 days
+  for the event log) — config keys exist but no pruner runs yet.
 
 ## 13. Configuration
 
@@ -631,6 +678,11 @@ identification:
     enabled: true
     binary: urh_cli
 
+library:
+  enabled: true
+  path: library.yaml         # YAML file of operator-curated entries
+  suggest_new: true          # on miss, attach paste-ready YAML to report
+
 notify:
   - sink: stdout
   - sink: jsonl
@@ -641,20 +693,63 @@ notify:
       types: [appearance, disappearance, identification]
 ```
 
+### 13.1 Library schema
+
+The library YAML is loaded by `Library.load()` on startup. Each
+entry has an `id`, optional `name`/`notes`/`tags`, and a `match`
+block. Only `center_hz` is required in `match`; the other
+criteria (modulation, bw_3db_hz, symbol_rate_hz) are filtered out
+of consideration when omitted.
+
+```yaml
+entries:
+  - id: my-mystery-433
+    name: "Mystery 433 MHz OOK device"
+    notes: "First observed 2026-05-14 in the lab"
+    tags: [lab, unknown]
+    match:
+      center_hz:                433.928e+6
+      center_tolerance_hz:      50_000
+      modulation:               OOK            # optional, exact
+      bw_3db_hz:                2200           # optional
+      bw_3db_tolerance_hz:      1500
+      symbol_rate_hz:           5900           # optional
+      symbol_rate_tolerance_hz: 300
+```
+
+Match scoring: every supplied criterion must pass its tolerance
+check; entries where any defined criterion fails are rejected. For
+passing entries, confidence is `1 - mean(d_i)` where each `d_i =
+|observed - target| / tolerance` is normalized to [0, 1]. A perfect
+hit scores 1.0; a just-barely-pass scores 0. When multiple entries
+match, the highest-confidence one wins. See `config/library.example.yaml`
+for a working sample.
+
 ## 14. CLI
 
+Shipping today:
+
 ```
-riotduck scan         # run continuous scan+detect+notify (the main loop)
-riotduck devices      # list discovered SDRs, capabilities, current role
-riotduck ranges       # list configured + predefined ranges
-riotduck baseline     # one-shot: build a baseline for N seconds and dump
-riotduck capture      # one-shot: capture I/Q at f, bw, dur to file
-riotduck analyze      # offline: run id/analysis pipeline on an .cf32 file
-riotduck replay       # offline: replay a baseline.npz through detection
-riotduck doctor       # environment check: SoapySDR, rtl_433, urh_cli, perms
+riotduck scan                 # main loop: scan + detect + capture + identify
+riotduck devices              # list discovered SDRs
+riotduck ranges               # list configured + predefined ranges
+riotduck doctor               # environment check; rtl_433 version + alt-install
+riotduck capture              # one-shot I/Q dump to a .cf32 file
+riotduck analyze <file>       # run rtl_433 against an existing .cf32 (+ flags)
+riotduck library list         # list user-curated fingerprint entries
+riotduck library show <id>    # full detail for one library entry
 ```
 
-Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
+Future:
+
+```
+riotduck baseline             # build a baseline for N seconds and dump (TODO)
+riotduck replay <baseline>    # replay a baseline.npz through detection (TODO)
+riotduck library add/remove   # mutate the library without hand-editing YAML
+```
+
+Common flags: `--config`, `--log-level`. `scan` and `devices` also
+take `--fake N` / `--fake-profile <yaml>` for the synthetic backend.
 
 ## 15. Operational Concerns
 
@@ -697,7 +792,7 @@ Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
 - Validated end-to-end on a real RTL-SDR + a 433.92 MHz transmitter. ✅
 - SQLite event tables: deferred — JSONL is the durable log for now.
 
-### Phase 4 (early) — Unknown-signal analysis ✅ in
+### Phase 4 (early) — Unknown-signal analysis ✅ complete
 - AnalysisAgent subscribes to rtl_433 misses. ✅
 - Burst segmentation (envelope thresholding, smoothing, merging). ✅
 - Bandwidth measurement at -3/-6/-20 dB with DC mask. ✅
@@ -710,6 +805,18 @@ Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
   doesn't decode: correctly reported OOK, ~6.5 kbit/s, ~940 Hz
   carrier BW, ~50 kHz freq offset. ✅
 
+### Phase 4 (mid) — User fingerprint library ✅ complete
+- YAML schema for operator-curated entries with per-criterion
+  tolerances (center, modulation, BW, symbol rate). ✅
+- Match scoring with confidence = 1 - mean(normalized distance). ✅
+- `Library.load/save`, accepts pyyaml-unfriendly scientific notation. ✅
+- Wired into AnalysisAgent: hits publish a second Identification
+  with `source="library"`; misses optionally attach a paste-ready
+  candidate YAML to the AnalysisReport's notes. ✅
+- `riotduck library list/show` CLI surface. ✅
+- 26 unit tests covering scoring, YAML I/O, agent integration,
+  CLI. ✅
+
 ### Phase 3 — HackRF fast path + URH
 - HackRF SoapySDR streaming validated on real hardware (path
   exists; no rig tested yet).
@@ -721,11 +828,13 @@ Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
 ### Phase 4 (rest) — Multi-SDR orchestration
 - Dedicated CaptureAgent under Orchestrator with device role
   assignment policy (§10) and dynamic reassignment on detection.
-- Cross-agent dedup (currently per-agent; multi-SDR with
-  overlapping ranges can publish duplicates).
+- Cross-agent dedup + cross-agent library lookup (today both are
+  per-agent; multi-SDR scanning overlapping ranges can publish
+  duplicates).
 - PSK distinguishing in the classifier (currently coarsely lumped
-  under "unknown" or "FSK").
+  under "FSK" or "unknown").
 - Persistent baselines across restarts.
+- `riotduck library add/remove/import/export` subcommands.
 
 ### Phase 5 — Polish
 - SQLite event store with retention policies.
@@ -735,10 +844,13 @@ Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
   baseline.
 - Sidecar `.meta.json` next to each `.cf32` so offline `analyze`
   / `replay` doesn't need to guess sample rate or center.
+- Auto-curated library entries (with the operator's consent): if a
+  signal is seen N times with stable features, suggest promoting it
+  to a named entry.
 
 ## 16a. Real-hardware findings + next steps
 
-Things uncovered by the first RTL-SDR runs that informed v0.1.1:
+### Findings (informed v0.1.1)
 
 1. **pyrtlsdr 0.4 / librtlsdr 2.x mismatch.** Stock Osmocom
    librtlsdr 2.0.2 doesn't export `rtlsdr_set_dithering` which
@@ -758,45 +870,66 @@ Things uncovered by the first RTL-SDR runs that informed v0.1.1:
    the sweep's tune I/Q so the agent dumps the same samples that
    produced the FFT spike — burst contents preserved.
 6. **rtl_433 from April 2021 was on `$PATH`** (shadowing brew's
-   2025.12). Spec assumption that whatever's on PATH is current is
-   wrong; `riotduck doctor` should grow a version check.
+   2025.12). `riotduck doctor` now parses `rtl_433 -V`, flags any
+   install older than v23, and surfaces alternative installs
+   (other PATH entries + brew's binary even when it isn't linked
+   into PATH).
+7. **Strong-emitter sidelobes triggered ~30 spurious detections
+   per real-world press.** Each had nearly-identical OOK / ~5.9 kHz
+   features — the analyzer fingerprinted them as the same logical
+   signal, which made the false-positive pattern obvious. Concrete
+   followup: bin-cluster suppression at detect time (§16a item 3).
 
-What I'd tackle next, in rough order:
+### What I'd tackle next, in rough order
 
-1. **`riotduck doctor` rtl_433 version check.** Parse `-V`, warn on
-   anything older than 22.x (when many decoders were added) and on
-   binaries shadowed by older copies earlier in PATH.
-2. **Capture sidecar metadata.** Write `<id>.meta.json` next to each
-   `.cf32` with samp_rate / center_hz / device / antenna / config
-   snapshot. Today the AnalysisAgent receives this via the
+1. **Capture sidecar metadata.** Write `<id>.meta.json` next to
+   each `.cf32` with samp_rate / center_hz / device / antenna /
+   config snapshot. Today the AnalysisAgent receives this via the
    Identification's `_capture` dict; offline `analyze` and `replay`
    need it on disk.
-3. **HackRF on real hardware.** Validate streaming, implement the
+2. **`riotduck library add/remove` CLI.** Today users hand-edit the
+   YAML. The doctor-style "candidate YAML" snippet on misses is the
+   bridge for now, but a `library add --from-detection <id>`
+   command (consuming the most recent AnalysisReport for that
+   detection) would close the loop.
+3. **Bin-cluster suppression in the detector.** When a bin fires
+   strongly (>30 dB SNR), shadow its ±N neighbors from triggering
+   for the same sweep — cuts the sidelobe storm of ~30 spurious
+   detections per strong press.
+4. **HackRF on real hardware.** Validate streaming, implement the
    `hackrf_sweep` subprocess parser for wide ranges.
-4. **PSK distinguishing in the classifier.** Add a phase-jump
-   detector for BPSK/QPSK so we don't lump them under "unknown" or
-   "FSK".
-5. **URH demod once the URH-NG CLI surface is confirmed.**
-6. **Persistent baselines.** `BaselineEngine.snapshot()` already
+5. **PSK distinguishing in the classifier.** Add a phase-jump
+   detector for BPSK/QPSK so we don't lump them under "FSK" or
+   "unknown".
+6. **URH demod once the URH-NG CLI surface is confirmed.**
+7. **Persistent baselines.** `BaselineEngine.snapshot()` already
    produces the npz blob; need save/load + max-age policy in the
    runner.
-7. **Orchestrator + CaptureAgent split for multi-SDR.**
+8. **Orchestrator + CaptureAgent split for multi-SDR.** Includes
+   cross-agent dedup + cross-agent library lookup.
 
 ## 17. Open Questions
 
 - **URH-NG**: confirm exact binary/CLI surface the user has in mind.
   Spec assumes `urh_cli`; may need a thin GNU-Radio flowgraph instead.
-- **Baseline window size**: 300 samples is a guess. Should be tuned
-  against real-world false-positive rate on a typical urban spectrum.
-- **Bin width vs. emitter bandwidth**: detection currently treats each
-  bin independently before coalescing. For very narrow emitters
-  (key fobs at 2 kHz deviation) we may want a matched-bandwidth
-  detector instead. TBD after Phase 1 measurements.
-- **Multi-host federation**: out of scope for v1; mentioned because the
-  bus abstraction admits it.
+- **Baseline window size**: 300 samples (default) seemed OK on the
+  one urban-spectrum sample we've run. Real corpus tuning still
+  TBD; revisit once HackRF lands and we can cover multi-GHz ranges.
+- **Strong-emitter sidelobe storm**: a single real press at +45 dB
+  SNR triggered ~30 spurious detections in adjacent bins, all
+  classifying identically. Bin-cluster suppression at detect-time
+  (16a item 3) is the planned fix; before implementing, measure
+  whether a tighter `k_up` alone is enough.
+- **Library cross-pollination**: when multiple SDRs sweep
+  overlapping ranges, library hits would currently fire on each.
+  Either dedupe identification events the same way as detection
+  events, or move the library lookup behind the (future)
+  Orchestrator.
+- **Multi-host federation**: out of scope for v1; mentioned because
+  the bus abstraction admits it.
 - **Privacy / scope-of-collection**: by default the system records
-  I/Q broadly. We should make the retention defaults conservative and
-  call out the legal/ethical implications in the README.
+  I/Q broadly. Retention defaults are conservative (14 days I/Q);
+  the README calls out the legal/ethical implications.
 
 ## 18. Glossary
 
