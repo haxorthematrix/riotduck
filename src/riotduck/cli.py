@@ -154,29 +154,70 @@ def ranges(ctx: click.Context, predefined: bool) -> None:
 @main.command()
 def doctor() -> None:
     """Check the environment: SDR backends, rtl_433, urh_cli, perms."""
+    from riotduck.fingerprint.rtl_433 import (
+        RTL_433_MIN_RECOMMENDED,
+        get_rtl_433_info,
+    )
     from riotduck.sdr.hackrf import hackrf_available
     from riotduck.sdr.rtlsdr import rtlsdr_available
 
-    def _ok(b: bool) -> str:
-        return "[green]ok[/green]" if b else "[red]missing[/red]"
+    OK = "[green]ok[/green]"
+    WARN = "[yellow]warn[/yellow]"
+    MISSING = "[red]missing[/red]"
 
     t = Table(title="riotduck doctor")
     t.add_column("check")
     t.add_column("status")
     t.add_column("notes")
 
-    t.add_row("RTL-SDR backend", _ok(rtlsdr_available()),
+    t.add_row("RTL-SDR backend",
+              OK if rtlsdr_available() else MISSING,
               "SoapySDR or pyrtlsdr")
-    t.add_row("HackRF backend", _ok(hackrf_available()),
+    t.add_row("HackRF backend",
+              OK if hackrf_available() else MISSING,
               "SoapySDR with hackrf driver")
-    t.add_row("rtl_433 binary", _ok(shutil.which("rtl_433") is not None),
-              "needed for fingerprinting")
-    t.add_row("urh_cli binary", _ok(shutil.which("urh_cli") is not None),
+
+    # rtl_433 — version + alternative-install detection.
+    info = get_rtl_433_info()
+    if not info.installed:
+        t.add_row("rtl_433 binary", MISSING, "needed for fingerprinting")
+    else:
+        notes: list[str] = []
+        status = OK
+        if info.version is None:
+            status = WARN
+            notes.append(info.error or "version unparseable")
+        else:
+            notes.append(f"v{info.version_str}")
+            if info.is_stale:
+                status = WARN
+                min_v = ".".join(str(x) for x in RTL_433_MIN_RECOMMENDED)
+                notes.append(f"[yellow]old (< {min_v} recommended)[/yellow]")
+        notes.append(info.path or "")
+        t.add_row("rtl_433 binary", status, " · ".join(notes))
+        for shadow in info.shadows:
+            from riotduck.fingerprint.rtl_433 import probe_rtl_433_version
+            sv = probe_rtl_433_version(shadow)
+            sv_str = f"v{sv[0]}.{sv[1]:02d}" if sv else "?"
+            # If the alternative is *newer* than the active binary,
+            # warn — the user is probably running the wrong one.
+            newer = sv is not None and info.version is not None and sv > info.version
+            t.add_row(
+                "rtl_433 alt install",
+                WARN if newer else "[dim]info[/dim]",
+                f"{sv_str} at {shadow}"
+                + (" [yellow](newer than active)[/yellow]" if newer else ""),
+            )
+
+    t.add_row("urh_cli binary",
+              OK if shutil.which("urh_cli") is not None else MISSING,
               "optional, URH-based demod")
 
     mgr = DeviceManager()
     recs = mgr.discover()
-    t.add_row("Devices discovered", _ok(bool(recs)), f"{len(recs)} device(s)")
+    t.add_row("Devices discovered",
+              OK if recs else MISSING,
+              f"{len(recs)} device(s)")
 
     console.print(t)
 
