@@ -17,7 +17,7 @@ from loguru import logger
 
 from riotduck.bus import EventBus
 from riotduck.config import NotifySink
-from riotduck.events import Detection, Identification, Topics
+from riotduck.events import AnalysisReport, Detection, Identification, Topics
 
 
 def _to_jsonable(payload: Any) -> Any:
@@ -119,6 +119,14 @@ class StdoutSink(NotificationSink):
                     f"conf={payload.confidence:.2f} det={payload.detection_id[:8]}",
                     flush=True,
                 )
+        elif isinstance(payload, AnalysisReport):
+            bw3 = f"{payload.bw_3db_hz/1e3:.1f} kHz" if payload.bw_3db_hz else "?"
+            sr = f"{payload.symbol_rate_hz:.0f} Hz" if payload.symbol_rate_hz else "?"
+            print(
+                f"[{topic}] >> analysis: mod={payload.modulation} "
+                f"bw_3dB={bw3} sym_rate={sr} det={payload.detection_id[:8]}",
+                flush=True,
+            )
         else:
             print(f"[{topic}] {payload}", flush=True)
 

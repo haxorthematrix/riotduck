@@ -64,27 +64,37 @@ class FingerprintAgent(Agent):
             cap.center_hz,
             tuple(self.id_cfg.rtl_433.extra_args),
         )
+        # Capture metadata downstream consumers (analyzer agent) need
+        # in order to load the I/Q without a sidecar file.
+        cap_meta = {
+            "iq_path": cap.path,
+            "samp_rate": cap.samp_rate,
+            "center_hz": cap.center_hz,
+            "duration_s": cap.duration_s,
+        }
         if result.hits:
             for hit in result.hits:
                 ident = Identification(
                     detection_id=cap.detection_id,
                     source="rtl_433",
                     device_class=hit.model,
-                    decoded=hit.decoded,
+                    decoded={**hit.decoded, "_capture": cap_meta},
                     confidence=hit.confidence,
                 )
                 await self.bus.publish(Topics.IDENTIFICATION, ident)
         else:
-            # Run completed (or failed) with no hits — emit a sentinel.
             ident = Identification(
                 detection_id=cap.detection_id,
                 source="rtl_433",
                 device_class=None,
-                decoded={"returncode": result.returncode, "stderr_tail": result.stderr[-500:]},
+                decoded={
+                    "returncode": result.returncode,
+                    "stderr_tail": result.stderr[-500:],
+                    "_capture": cap_meta,
+                },
                 confidence=0.0,
             )
             await self.bus.publish(Topics.IDENTIFICATION, ident)
-            # Hand off to URH / unknown analysis when those land.
             if self.id_cfg.urh.enabled:
                 logger.debug("rtl_433 miss for {}; URH fallback not yet implemented",
                              cap.detection_id)

@@ -18,6 +18,7 @@ from contextlib import suppress
 
 from loguru import logger
 
+from riotduck.agents.analysis_agent import AnalysisAgent
 from riotduck.agents.fingerprint_agent import FingerprintAgent
 from riotduck.agents.scanner_agent import ScannerAgent
 from riotduck.bus import EventBus
@@ -77,13 +78,19 @@ async def run_scan(config: Config) -> None:
     ]
 
     fingerprint_agent: FingerprintAgent | None = None
+    analysis_agent: AnalysisAgent | None = None
     if capture_enabled:
         fingerprint_agent = FingerprintAgent(bus=bus, id_cfg=config.identification)
+        analysis_agent = AnalysisAgent(bus=bus)
 
     sinks = build_sinks(config.notify)
     sink_tasks = [asyncio.create_task(s.run(bus), name=f"sink:{s.name}") for s in sinks]
 
-    agents = list(scanner_agents) + ([fingerprint_agent] if fingerprint_agent else [])
+    agents: list = list(scanner_agents)
+    if fingerprint_agent is not None:
+        agents.append(fingerprint_agent)
+    if analysis_agent is not None:
+        agents.append(analysis_agent)
     for a in agents:
         await a.start()
 
@@ -99,10 +106,11 @@ async def run_scan(config: Config) -> None:
             loop.add_signal_handler(sig, _signal_handler)
 
     logger.info(
-        "scanning {} ranges across {} device(s); fingerprint={}",
+        "scanning {} ranges across {} device(s); fingerprint={} analysis={}",
         len(ranges),
         len(scanner_agents),
         fingerprint_agent is not None,
+        analysis_agent is not None,
     )
     try:
         await stop.wait()
