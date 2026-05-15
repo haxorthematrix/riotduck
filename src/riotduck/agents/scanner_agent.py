@@ -22,7 +22,11 @@ from loguru import logger
 from riotduck.agents.base import Agent
 from riotduck.baseline import BaselineEngine
 from riotduck.bus import EventBus
-from riotduck.capture import capture_for_detection, choose_capture_samp_rate
+from riotduck.capture import (
+    capture_for_detection,
+    capture_from_buffer,
+    choose_capture_samp_rate,
+)
 from riotduck.config import DetectionConfig, OrchestratorConfig, RangeConfig
 from riotduck.dedup import EventTracker
 from riotduck.events import Detection, Topics
@@ -59,11 +63,13 @@ class ScannerAgent(Agent):
             re_observation_s=self.orch_cfg.re_observation_s,
             min_freq_tolerance_hz=detect_cfg.min_freq_tolerance_hz,
         )
+        self._scanner: Scanner | None = None
 
     async def run(self) -> None:
         session = self.manager.acquire(self.device_serial, holder=self.name)
         try:
             scanner = Scanner(session)
+            self._scanner = scanner
             plans = [
                 plan_sweep(r, session.info.samp_rates or (2.4e6,))
                 for r in self.ranges
@@ -127,6 +133,23 @@ class ScannerAgent(Agent):
         rng = self._range_by_name.get(detection.range_name)
         if rng is None:
             return
+
+        # Preferred path: use the in-memory I/Q from the sweep that
+        # produced this detection. The same samples that registered as
+        # an FFT bin spike are guaranteed to contain the burst.
+        if self._scanner is not None:
+            tune = self._scanner.find_capture_for_freq(detection.center_hz)
+            if tune is not None:
+                cap = await asyncio.to_thread(
+                    capture_from_buffer, tune, detection, self.captures_dir
+                )
+                if cap is not None:
+                    detection.iq_path = cap.path
+                    await self.bus.publish(Topics.CAPTURE_RESULT, cap)
+                    return
+
+        # Fallback: retune + re-read. Loses the burst on short
+        # transmissions but is correct for steady emitters.
         samp_rate = choose_capture_samp_rate(
             detection,
             rng.samp_rate,

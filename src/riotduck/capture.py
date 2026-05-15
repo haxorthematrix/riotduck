@@ -18,6 +18,7 @@ Sample-rate selection:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
@@ -25,6 +26,44 @@ from loguru import logger
 from riotduck.events import CaptureResult, Detection
 from riotduck.sdr.base import SDRSession
 from riotduck.storage.files import capture_path, write_iq_cf32
+
+if TYPE_CHECKING:
+    from riotduck.scanner import TuneCapture
+
+
+def capture_from_buffer(
+    tune: "TuneCapture",
+    detection: Detection,
+    captures_dir: Path | str,
+) -> CaptureResult | None:
+    """Write a CaptureResult from already-buffered sweep I/Q.
+
+    Used when the scanner retained the sweep buffer that produced the
+    detection — the same samples that triggered the FFT spike are
+    written to disk, which means the burst is actually in the file
+    (unlike a post-detection retune-and-read).
+    """
+    if tune.iq.size == 0:
+        logger.warning("capture_from_buffer: empty tune buffer for {}", detection.id)
+        return None
+    path = capture_path(captures_dir, detection.id, detection.ts)
+    n_written = write_iq_cf32(path, tune.iq)
+    duration_s = n_written / tune.samp_rate if tune.samp_rate > 0 else 0.0
+    logger.info(
+        "capture (buffered): {} samples ({:.3f} s @ {:.3f} MS/s, tune={:.4f} MHz) → {}",
+        n_written,
+        duration_s,
+        tune.samp_rate / 1e6,
+        tune.center_hz / 1e6,
+        path,
+    )
+    return CaptureResult(
+        detection_id=detection.id,
+        path=str(path),
+        samp_rate=float(tune.samp_rate),
+        center_hz=float(tune.center_hz),
+        duration_s=duration_s,
+    )
 
 
 def choose_capture_samp_rate(

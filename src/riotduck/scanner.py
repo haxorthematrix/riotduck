@@ -18,7 +18,8 @@ Implementation notes:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import numpy as np
 from loguru import logger
@@ -48,6 +49,32 @@ class SweepPlan:
     @property
     def native_bin_hz(self) -> float:
         return self.samp_rate / self.fft_size
+
+
+@dataclass
+class TuneCapture:
+    """Raw I/Q from one tune point of the most recent sweep.
+
+    Retained by the Scanner so the agent can dump the *same samples
+    that triggered a detection* on appearance, instead of retuning
+    and re-reading 400 ms of post-burst noise. A burst that landed
+    inside a sweep's dwell window is preserved here.
+    """
+
+    center_hz: float
+    samp_rate: float
+    usable_bw_hz: float
+    iq: np.ndarray
+    ts: float = field(default_factory=time.time)
+
+    def covers(self, freq_hz: float) -> bool:
+        return abs(freq_hz - self.center_hz) <= self.usable_bw_hz / 2.0
+
+    @property
+    def duration_s(self) -> float:
+        if self.samp_rate <= 0:
+            return 0.0
+        return len(self.iq) / self.samp_rate
 
 
 def plan_sweep(range_cfg: RangeConfig, supported_samp_rates: tuple[float, ...]) -> SweepPlan:
@@ -104,9 +131,18 @@ class Scanner:
     shared with another consumer between sweeps.
     """
 
-    def __init__(self, session: SDRSession) -> None:
+    def __init__(self, session: SDRSession, retain_captures: bool = True) -> None:
         self.session = session
+        self.retain_captures = retain_captures
+        self.last_captures: list[TuneCapture] = []
         self._window_cache: dict[tuple[str, int], np.ndarray] = {}
+
+    def find_capture_for_freq(self, freq_hz: float) -> TuneCapture | None:
+        """Return the most-recent tune capture whose passband contains freq_hz."""
+        candidates = [c for c in self.last_captures if c.covers(freq_hz)]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda c: abs(c.center_hz - freq_hz))
 
     def _get_window(self, kind: str, n: int) -> np.ndarray:
         key = (kind, n)
@@ -126,6 +162,7 @@ class Scanner:
 
         all_freqs: list[np.ndarray] = []
         all_power: list[np.ndarray] = []
+        captures: list[TuneCapture] = []
 
         window = self._get_window(plan.window_kind, plan.fft_size)
         frame_samples = plan.fft_size
@@ -137,6 +174,19 @@ class Scanner:
             if len(iq) < frame_samples:
                 logger.warning("short read at {} Hz: got {}/{}", center, len(iq), need)
                 continue
+
+            if self.retain_captures:
+                # Retain a *copy* so the underlying read buffer can
+                # be reused on the next iteration without aliasing.
+                captures.append(
+                    TuneCapture(
+                        center_hz=float(center),
+                        samp_rate=float(plan.samp_rate),
+                        usable_bw_hz=float(plan.usable_bw_hz),
+                        iq=np.asarray(iq, dtype=np.complex64).copy(),
+                        ts=time.time(),
+                    )
+                )
 
             frames: list[np.ndarray] = []
             for k in range(plan.frames_per_dwell):
@@ -159,6 +209,10 @@ class Scanner:
             freqs, psd = decimate_to_bin_width(freqs, psd, rng.bin_hz)
             all_freqs.append(freqs)
             all_power.append(psd)
+
+        # Replace the prior sweep's retained buffers in one shot, so the
+        # agent's lookups see a coherent set of tune captures.
+        self.last_captures = captures
 
         if not all_freqs:
             return SweepFrame(
