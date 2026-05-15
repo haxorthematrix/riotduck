@@ -355,5 +355,84 @@ def analyze(ctx: click.Context, iq_path: str, samp_rate: float,
     console.print(t)
 
 
+@main.group()
+def library() -> None:
+    """Inspect the user-curated fingerprint library."""
+
+
+def _resolve_library_path(ctx: click.Context, explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    cfg_path = ctx.obj.get("config_path") if ctx.obj else None
+    try:
+        cfg = _resolve_config(cfg_path) if cfg_path else None
+    except Exception:
+        cfg = None
+    if cfg is not None:
+        return Path(cfg.library.path)
+    return Path("library.yaml")
+
+
+@library.command("list")
+@click.option("--path", default=None, help="Library YAML; default from config.")
+@click.pass_context
+def library_list(ctx: click.Context, path: str | None) -> None:
+    """List entries with a one-line summary each."""
+    from riotduck.library import Library
+    p = _resolve_library_path(ctx, path)
+    lib = Library.load(p)
+    if len(lib) == 0:
+        console.print(f"[yellow]library is empty[/yellow] ({p})")
+        return
+    t = Table(title=f"fingerprint library — {p}")
+    t.add_column("id")
+    t.add_column("name")
+    t.add_column("center (MHz)")
+    t.add_column("mod")
+    t.add_column("BW (kHz)")
+    t.add_column("sym (Hz)")
+    t.add_column("tags")
+    for e in lib.entries:
+        m = e.match
+        t.add_row(
+            e.id,
+            e.name or "[dim]—[/dim]",
+            f"{m.center_hz/1e6:.4f}",
+            m.modulation or "-",
+            f"{m.bw_3db_hz/1e3:.2f}" if m.bw_3db_hz else "-",
+            f"{m.symbol_rate_hz:.0f}" if m.symbol_rate_hz else "-",
+            ", ".join(e.tags) or "-",
+        )
+    console.print(t)
+
+
+@library.command("show")
+@click.argument("entry_id")
+@click.option("--path", default=None, help="Library YAML; default from config.")
+@click.pass_context
+def library_show(ctx: click.Context, entry_id: str, path: str | None) -> None:
+    """Show full detail for one entry."""
+    from riotduck.library import Library
+    p = _resolve_library_path(ctx, path)
+    lib = Library.load(p)
+    entry = lib.get(entry_id)
+    if entry is None:
+        console.print(f"[red]no entry with id {entry_id!r}[/red] in {p}")
+        sys.exit(1)
+    m = entry.match
+    console.print(f"[bold]{entry.id}[/bold]" + (f"  — {entry.name}" if entry.name else ""))
+    if entry.notes:
+        console.print(f"  notes: {entry.notes}")
+    if entry.tags:
+        console.print(f"  tags:  {', '.join(entry.tags)}")
+    console.print(f"  center_hz:   {m.center_hz/1e6:.6f} MHz  (± {m.center_tolerance_hz/1e3:.1f} kHz)")
+    if m.modulation:
+        console.print(f"  modulation:  {m.modulation}")
+    if m.bw_3db_hz is not None:
+        console.print(f"  bw_3db:      {m.bw_3db_hz/1e3:.2f} kHz  (± {m.bw_3db_tolerance_hz/1e3:.2f} kHz)")
+    if m.symbol_rate_hz is not None:
+        console.print(f"  sym_rate:    {m.symbol_rate_hz:.0f} Hz  (± {m.symbol_rate_tolerance_hz:.0f} Hz)")
+
+
 if __name__ == "__main__":
     main()

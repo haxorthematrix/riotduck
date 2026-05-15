@@ -5,9 +5,12 @@ Subscribes to `identification` events. When rtl_433 reports a miss
 capture file exists, loads the I/Q and runs the heuristic classifier.
 Publishes an `AnalysisReport` on the bus.
 
-The agent is independent of rtl_433 — when URH integration lands it
-will gate on URH misses too. Today rtl_433 is the only thing that
-produces identification events.
+If a user-curated fingerprint Library is configured, the agent also
+matches the analyzer's output against it. A hit becomes an
+`Identification(source="library")` event — downstream consumers can
+treat library hits and rtl_433 hits uniformly. A miss optionally
+attaches a YAML candidate snippet to the report so the operator has
+a one-step path to adding the signal to their library.
 """
 
 from __future__ import annotations
@@ -21,18 +24,23 @@ from riotduck.agents.base import Agent
 from riotduck.analysis.classifier import analyze
 from riotduck.bus import EventBus
 from riotduck.events import AnalysisReport, Identification, Topics
+from riotduck.library import Library, suggest_yaml
 from riotduck.storage.files import read_iq_cf32
 
 
 class AnalysisAgent(Agent):
     name = "analysis"
 
-    def __init__(self, bus: EventBus) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        library: Library | None = None,
+        suggest_new: bool = True,
+    ) -> None:
         super().__init__(bus)
-        # Track which detections we've already analyzed so an emitter
-        # that re-fires within the dedup window doesn't get analyzed
-        # repeatedly with the same data.
         self._seen: set[str] = set()
+        self._library = library or Library.empty()
+        self._suggest_new = suggest_new
 
     async def run(self) -> None:
         async with self.bus.subscribe(Topics.IDENTIFICATION) as sub:
@@ -61,6 +69,7 @@ class AnalysisAgent(Agent):
             return
         iq_path = cap_meta.get("iq_path")
         samp_rate = float(cap_meta.get("samp_rate") or 0.0)
+        center_hz = float(cap_meta.get("center_hz") or 0.0)
         if not iq_path or samp_rate <= 0 or not os.path.exists(iq_path):
             logger.debug("analysis: capture file not found for {} at {}",
                          ident.detection_id[:8], iq_path)
@@ -70,21 +79,82 @@ class AnalysisAgent(Agent):
         if result is None:
             return
 
+        # Apparent center of the signal in absolute Hz: tune center +
+        # FFT peak offset within the captured passband.
+        absolute_center_hz = center_hz + result.freq_offset_hz
+
+        match = self._library.best_match(
+            center_hz=absolute_center_hz,
+            modulation=result.modulation,
+            bw_3db_hz=result.bw_3db_hz,
+            symbol_rate_hz=result.symbol_rate_hz,
+        )
+
+        notes_extra: list[str] = []
+        if match is not None:
+            notes_extra.append(
+                f"library match: {match.entry.id} (conf={match.confidence:.2f})"
+            )
+        elif self._suggest_new and self._library_suggestion_makes_sense(result):
+            yaml_snippet = suggest_yaml(
+                center_hz=absolute_center_hz,
+                modulation=result.modulation,
+                bw_3db_hz=result.bw_3db_hz,
+                symbol_rate_hz=result.symbol_rate_hz,
+            )
+            notes_extra.append(
+                "no library match — candidate entry:\n" + yaml_snippet
+            )
+
+        report_kwargs = result.as_report_kwargs()
+        if notes_extra:
+            existing = report_kwargs.get("notes") or ""
+            report_kwargs["notes"] = (
+                (existing + " | " if existing else "") + " | ".join(notes_extra)
+            )
+
         report = AnalysisReport(
             detection_id=ident.detection_id,
             artifacts={"iq_path": iq_path},
-            **result.as_report_kwargs(),
+            **report_kwargs,
         )
         await self.bus.publish(Topics.ANALYSIS_REPORT, report)
         logger.info(
-            "analysis: det={} mod={}({:.2f}) bw3={} sr={} bursts={}",
+            "analysis: det={} mod={}({:.2f}) bw3={} sr={} bursts={} lib={}",
             ident.detection_id[:8],
             result.modulation,
             result.modulation_confidence,
             f"{result.bw_3db_hz:.0f}Hz" if result.bw_3db_hz else "?",
             f"{result.symbol_rate_hz:.1f}Hz" if result.symbol_rate_hz else "?",
             len(result.bursts),
+            match.entry.id if match else "-",
         )
+
+        # If we matched the library, ALSO publish an Identification
+        # event so notifiers/aggregators see a "known" signal.
+        if match is not None:
+            lib_ident = Identification(
+                detection_id=ident.detection_id,
+                source="library",
+                device_class=match.entry.name or match.entry.id,
+                decoded={
+                    "library_id": match.entry.id,
+                    "tags": match.entry.tags,
+                    "notes": match.entry.notes,
+                    "distances": match.distances,
+                },
+                confidence=match.confidence,
+            )
+            await self.bus.publish(Topics.IDENTIFICATION, lib_ident)
+
+    @staticmethod
+    def _library_suggestion_makes_sense(result) -> bool:
+        """Only suggest a library entry for signals that classified well."""
+        if result.modulation in ("unknown", None):
+            return False
+        if result.modulation_confidence < 0.5:
+            return False
+        return True
 
 
 def _load_and_analyze(iq_path: str, samp_rate: float):

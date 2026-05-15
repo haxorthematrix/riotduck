@@ -116,6 +116,14 @@ class IdentificationConfig(BaseModel):
     min_confidence: float = 0.7
 
 
+class LibraryConfig(BaseModel):
+    """User-curated fingerprint library (see riotduck/library.py)."""
+
+    enabled: bool = True
+    path: str = "library.yaml"
+    suggest_new: bool = True       # emit a YAML snippet on miss
+
+
 class NotifyFilter(BaseModel):
     types: list[str] | None = None
     ranges: list[str] | None = None
@@ -145,6 +153,7 @@ class Config(BaseModel):
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     identification: IdentificationConfig = Field(default_factory=IdentificationConfig)
+    library: LibraryConfig = Field(default_factory=LibraryConfig)
     notify: list[NotifySink] = Field(
         default_factory=lambda: [NotifySink(sink="stdout")]
     )

@@ -21,6 +21,7 @@ from loguru import logger
 from riotduck.agents.analysis_agent import AnalysisAgent
 from riotduck.agents.fingerprint_agent import FingerprintAgent
 from riotduck.agents.scanner_agent import ScannerAgent
+from riotduck.library import Library
 from riotduck.bus import EventBus
 from riotduck.config import Config, RangeConfig, RangeRef
 from riotduck.notify import build_sinks
@@ -81,7 +82,16 @@ async def run_scan(config: Config) -> None:
     analysis_agent: AnalysisAgent | None = None
     if capture_enabled:
         fingerprint_agent = FingerprintAgent(bus=bus, id_cfg=config.identification)
-        analysis_agent = AnalysisAgent(bus=bus)
+        library = Library.empty()
+        if config.library.enabled:
+            library = Library.load(config.library.path)
+            logger.info("loaded fingerprint library: {} entry(ies) from {}",
+                        len(library), config.library.path)
+        analysis_agent = AnalysisAgent(
+            bus=bus,
+            library=library,
+            suggest_new=config.library.suggest_new,
+        )
 
     sinks = build_sinks(config.notify)
     sink_tasks = [asyncio.create_task(s.run(bus), name=f"sink:{s.name}") for s in sinks]

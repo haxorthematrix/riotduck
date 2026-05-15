@@ -1,0 +1,26 @@
+# Example user fingerprint library.
+#
+# When the analyzer characterizes an unknown signal, riotduck looks
+# it up here. A hit becomes an `Identification(source=library)`
+# event, indistinguishable from rtl_433 hits except by `source`.
+#
+# Copy this to library.yaml (or wherever `library.path` points), then
+# tune the match criteria for your environment. The agent will print
+# a candidate entry block on every miss so you have something to
+# paste here without hand-deriving thresholds.
+
+entries:
+  - id: example-433-ook
+    name: Example 433 MHz OOK device
+    notes: |
+      Placeholder — replace with a description of your own emitter
+      (room, vendor, install date, etc.).
+    tags: [example]
+    match:
+      center_hz:                433.928e+6
+      center_tolerance_hz:      50_000
+      modulation:               OOK
+      bw_3db_hz:                2200
+      bw_3db_tolerance_hz:      1500
+      symbol_rate_hz:           5900
+      symbol_rate_tolerance_hz: 300
