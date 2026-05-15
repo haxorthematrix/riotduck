@@ -218,6 +218,46 @@ class BaselineEngine:
             "ts": np.array([time.time()]),
         }
 
+    def load_snapshot(self, snap: dict[str, np.ndarray]) -> bool:
+        """Restore engine state from a `snapshot()` dict.
+
+        Returns False (and leaves the engine untouched) if the snapshot
+        is incompatible with the engine's range config — e.g., a
+        different bin grid or a window size that doesn't match. The
+        caller can either start fresh or refuse to start.
+        """
+        try:
+            freqs = np.asarray(snap["freqs_hz"])
+            ring = np.asarray(snap["ring"])
+            state = np.asarray(snap["state"])
+            median = np.asarray(snap["median_dbfs"])
+            mad = np.asarray(snap["mad_dbfs"])
+            ring_pos = int(np.asarray(snap["ring_pos"]).flatten()[0])
+            ring_filled = int(np.asarray(snap["ring_filled"]).flatten()[0])
+        except (KeyError, ValueError, IndexError):
+            return False
+
+        ws = self.detect_cfg.window_size
+        n_bins = freqs.size
+        if ring.shape != (ws, n_bins):
+            return False
+        if state.shape != (n_bins,):
+            return False
+
+        # Allocate the rest (counters, _times) by initializing first.
+        self._init(freqs)
+        # Now overwrite the persisted slots.
+        assert self._ring is not None
+        self._ring[:] = ring.astype(np.float32, copy=False)
+        self._ring_pos = ring_pos % ws
+        self._ring_filled = max(0, min(ws, ring_filled))
+        self._state = state.astype(np.uint8, copy=False)
+        if median.size == n_bins:
+            self._median = median.astype(np.float32, copy=False)
+        if mad.size == n_bins:
+            self._mad = mad.astype(np.float32, copy=False)
+        return True
+
 
 def _shadow_radius_hz(detection: Detection, cfg: DetectionConfig) -> float:
     """How far a detection's sidelobes plausibly extend, in Hz.

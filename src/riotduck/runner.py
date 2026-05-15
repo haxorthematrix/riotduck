@@ -74,6 +74,7 @@ async def run_scan(config: Config) -> None:
             orch_cfg=config.orchestrator,
             captures_dir=config.storage.captures_dir,
             capture_enabled=capture_enabled,
+            storage_cfg=config.storage,
         )
         for rec in scan_devices
     ]

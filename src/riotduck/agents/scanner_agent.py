@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 from loguru import logger
 
@@ -27,11 +28,17 @@ from riotduck.capture import (
     capture_from_buffer,
     choose_capture_samp_rate,
 )
-from riotduck.config import DetectionConfig, OrchestratorConfig, RangeConfig
+from riotduck.config import (
+    DetectionConfig,
+    OrchestratorConfig,
+    RangeConfig,
+    StorageConfig,
+)
 from riotduck.dedup import EventTracker
 from riotduck.events import Detection, Topics
 from riotduck.scanner import Scanner, plan_sweep
 from riotduck.sdr.manager import DeviceManager
+from riotduck.storage.baselines import baseline_path, load_baseline, save_baseline
 
 
 class ScannerAgent(Agent):
@@ -45,6 +52,7 @@ class ScannerAgent(Agent):
         orch_cfg: OrchestratorConfig | None = None,
         captures_dir: str = "captures",
         capture_enabled: bool = True,
+        storage_cfg: StorageConfig | None = None,
     ) -> None:
         super().__init__(bus)
         self.name = f"scanner[{device_serial}]"
@@ -55,6 +63,7 @@ class ScannerAgent(Agent):
         self.orch_cfg = orch_cfg or OrchestratorConfig()
         self.captures_dir = captures_dir
         self.capture_enabled = capture_enabled
+        self.storage_cfg = storage_cfg or StorageConfig()
         self._engines: dict[str, BaselineEngine] = {
             r.name: BaselineEngine(range_cfg=r, detect_cfg=detect_cfg) for r in ranges
         }
@@ -64,6 +73,46 @@ class ScannerAgent(Agent):
             min_freq_tolerance_hz=detect_cfg.min_freq_tolerance_hz,
         )
         self._scanner: Scanner | None = None
+        self._last_baseline_save_mono: float = 0.0
+
+    def _baseline_path_for(self, range_name: str) -> Path:
+        return baseline_path(
+            self.storage_cfg.baselines_dir, range_name, self.device_serial
+        )
+
+    def _restore_baselines(self) -> None:
+        """Load .npz baselines for any range that has a fresh-enough one."""
+        if not self.storage_cfg.baseline_persist:
+            return
+        for r in self.ranges:
+            path = self._baseline_path_for(r.name)
+            snap = load_baseline(path, max_age_s=self.storage_cfg.baseline_max_age_s)
+            if snap is None:
+                continue
+            if self._engines[r.name].load_snapshot(snap):
+                logger.info(
+                    "{}: loaded baseline for {} from {}",
+                    self.name, r.name, path,
+                )
+            else:
+                logger.info(
+                    "{}: baseline {} incompatible with current config; "
+                    "starting fresh", self.name, path,
+                )
+
+    def _save_baselines(self) -> int:
+        """Persist all initialized engines. Returns count saved."""
+        if not self.storage_cfg.baseline_persist:
+            return 0
+        n = 0
+        for name, engine in self._engines.items():
+            try:
+                if save_baseline(self._baseline_path_for(name), engine) is not None:
+                    n += 1
+            except Exception as e:
+                logger.exception("{}: failed to save baseline {}: {}",
+                                 self.name, name, e)
+        return n
 
     async def run(self) -> None:
         session = self.manager.acquire(self.device_serial, holder=self.name)
@@ -74,6 +123,8 @@ class ScannerAgent(Agent):
                 plan_sweep(r, session.info.samp_rates or (2.4e6,))
                 for r in self.ranges
             ]
+            self._restore_baselines()
+            self._last_baseline_save_mono = time.monotonic()
             logger.info(
                 "{}: sweeping {} ranges, fft_size up to {}",
                 self.name,
@@ -105,7 +156,23 @@ class ScannerAgent(Agent):
                         await asyncio.sleep(slack)
                     else:
                         await asyncio.sleep(0)
+
+                # Periodic baseline persistence — checked outside the
+                # plan loop so we don't I/O between every short sweep.
+                if (
+                    self.storage_cfg.baseline_persist
+                    and self.storage_cfg.baseline_save_interval_s > 0
+                    and time.monotonic() - self._last_baseline_save_mono
+                    >= self.storage_cfg.baseline_save_interval_s
+                ):
+                    n = await asyncio.to_thread(self._save_baselines)
+                    logger.debug("{}: persisted {} baseline(s)", self.name, n)
+                    self._last_baseline_save_mono = time.monotonic()
         finally:
+            try:
+                await asyncio.to_thread(self._save_baselines)
+            except Exception as e:
+                logger.exception("{}: final baseline save failed: {}", self.name, e)
             self.manager.release(self.device_serial, session)
 
     async def _dispatch_detections(self, session, detections: list[Detection]) -> None:

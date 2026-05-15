@@ -163,6 +163,11 @@ class StorageConfig(BaseModel):
     baselines_dir: str = "baselines"
     retain_iq_days: int = 14
     retain_events_days: int = 90
+    # Persistent baselines: write a .npz per (range, device) so a
+    # restart skips warmup when a recent snapshot is available.
+    baseline_persist: bool = True
+    baseline_max_age_s: float = 24 * 3600.0
+    baseline_save_interval_s: float = 300.0
 
 
 class Config(BaseModel):

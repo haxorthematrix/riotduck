@@ -1,8 +1,10 @@
 # riotduck — RF Anomaly Detection System
 
-**Status:** v0.1 — Phases 1, 2, the start of Phase 4, and the user
-fingerprint library are in. Validated on real RTL-SDR hardware
-end-to-end.
+**Status:** v0.1.3 — Phases 1, 2, the start of Phase 4, and the user
+fingerprint library are in. v0.1.2 added capture sidecar metadata +
+`library add/remove`; v0.1.3 added persistent baselines (save/load
+.npz with a max-age policy, so restarts skip warmup). Validated on
+real RTL-SDR hardware end-to-end.
 **Owner:** Larry
 **Date:** 2026-05-15
 
@@ -23,7 +25,9 @@ What works today:
   retuning and re-reading. Captures contain the actual burst, not
   post-burst noise.
 - I/Q captures written as `.cf32`, day-partitioned under
-  `captures/YYYY-MM-DD/<detection_id>.cf32`.
+  `captures/YYYY-MM-DD/<detection_id>.cf32`, with a `.meta.json`
+  sidecar recording sample rate, tune center, and the originating
+  detection's properties so offline `analyze` works without flags.
 - **Three-stage identification stack** (see §7):
   - **rtl_433** subprocess wrapper + async FingerprintAgent for
     known protocols.
@@ -43,8 +47,14 @@ What works today:
   detects alternative installs (PATH shadows + Homebrew copies that
   haven't been symlinked into PATH).
 - CLI: `scan`, `devices`, `ranges`, `doctor`, `capture`, `analyze`,
-  `library list/show`.
-- **101 unit tests**, all passing, no hardware required.
+  `library list/show/add/remove`. `library add --from-capture <cf32>`
+  reads the sidecar, runs the analyzer, and pre-fills match fields.
+- **Persistent baselines**: ScannerAgent writes a `.npz` per
+  (range, device) every `baseline_save_interval_s` (default 5 min)
+  and on shutdown, then reloads on startup if a snapshot exists and
+  is younger than `baseline_max_age_s` (default 24 h). Restarts skip
+  warmup when a fresh snapshot is available.
+- **141 unit tests**, all passing, no hardware required.
 
 What's deferred:
 
@@ -58,12 +68,7 @@ What's deferred:
   library lookup is per-agent.
 - PSK distinguishing in the modulation classifier (today lumped
   into "FSK"/"unknown").
-- Capture sidecar metadata (`.meta.json` next to each `.cf32`) so
-  `analyze` / `replay` don't need command-line sample rate hints.
-- `riotduck library add/remove` subcommands (today users edit the
-  YAML by hand; `library list/show` are read-only).
 - SQLite event store (JSONL sink covers durable logging).
-- Persistent baselines across restarts.
 - Web dashboard (Phase 5).
 
 ### Verified against a real unknown emitter
@@ -834,7 +839,8 @@ take `--fake N` / `--fake-profile <yaml>` for the synthetic backend.
 - PSK distinguishing in the classifier (currently coarsely lumped
   under "FSK" or "unknown").
 - Persistent baselines across restarts.
-- `riotduck library add/remove/import/export` subcommands.
+- `riotduck library import/export` subcommands. (`add`/`remove`
+  shipped in v0.1.2.)
 
 ### Phase 5 — Polish
 - SQLite event store with retention policies.
@@ -842,8 +848,6 @@ take `--fake N` / `--fake-profile <yaml>` for the synthetic backend.
 - Additional sinks: MQTT, Slack, email, syslog.
 - `riotduck replay` for offline detection tuning against a recorded
   baseline.
-- Sidecar `.meta.json` next to each `.cf32` so offline `analyze`
-  / `replay` doesn't need to guess sample rate or center.
 - Auto-curated library entries (with the operator's consent): if a
   signal is seen N times with stable features, suggest promoting it
   to a named entry.
@@ -880,32 +884,36 @@ take `--fake N` / `--fake-profile <yaml>` for the synthetic backend.
    signal, which made the false-positive pattern obvious. Concrete
    followup: bin-cluster suppression at detect time (§16a item 3).
 
+### Landed in v0.1.2 / v0.1.3
+
+- **Capture sidecar metadata.** `<id>.meta.json` is now written next
+  to every `.cf32` with samp_rate, capture tune center, duration,
+  and a projection of the originating detection. `riotduck analyze`
+  treats `--samp-rate` / `--center` as optional and pulls them from
+  the sidecar when present.
+- **`riotduck library add/remove` CLI.** Explicit-field mode plus
+  `library add --from-capture <cf32>`, which reads the sidecar,
+  runs the unknown-signal analyzer, and pre-fills the match block.
+  `--replace` for overwrite; clean exit-1 on duplicate id without it.
+- **Bin-cluster shadow suppression.** Strong emitters (>25 dB SNR
+  by default) shadow their neighbors for the rest of the sweep —
+  cuts the ~30-sidelobe storm down to the single real detection.
+- **Persistent baselines.** `.npz` per (range, device) saved every
+  `baseline_save_interval_s` and on shutdown; reloaded on startup
+  when younger than `baseline_max_age_s`. Incompatible snapshots
+  (different bin grid or window size) are silently dropped and the
+  engine warms up fresh. `StorageConfig.baseline_persist` gates the
+  whole feature.
+
 ### What I'd tackle next, in rough order
 
-1. **Capture sidecar metadata.** Write `<id>.meta.json` next to
-   each `.cf32` with samp_rate / center_hz / device / antenna /
-   config snapshot. Today the AnalysisAgent receives this via the
-   Identification's `_capture` dict; offline `analyze` and `replay`
-   need it on disk.
-2. **`riotduck library add/remove` CLI.** Today users hand-edit the
-   YAML. The doctor-style "candidate YAML" snippet on misses is the
-   bridge for now, but a `library add --from-detection <id>`
-   command (consuming the most recent AnalysisReport for that
-   detection) would close the loop.
-3. **Bin-cluster suppression in the detector.** When a bin fires
-   strongly (>30 dB SNR), shadow its ±N neighbors from triggering
-   for the same sweep — cuts the sidelobe storm of ~30 spurious
-   detections per strong press.
-4. **HackRF on real hardware.** Validate streaming, implement the
-   `hackrf_sweep` subprocess parser for wide ranges.
-5. **PSK distinguishing in the classifier.** Add a phase-jump
+1. **PSK distinguishing in the classifier.** Add a phase-jump
    detector for BPSK/QPSK so we don't lump them under "FSK" or
    "unknown".
-6. **URH demod once the URH-NG CLI surface is confirmed.**
-7. **Persistent baselines.** `BaselineEngine.snapshot()` already
-   produces the npz blob; need save/load + max-age policy in the
-   runner.
-8. **Orchestrator + CaptureAgent split for multi-SDR.** Includes
+2. **HackRF on real hardware.** Validate streaming, implement the
+   `hackrf_sweep` subprocess parser for wide ranges.
+3. **URH demod once the URH-NG CLI surface is confirmed.**
+4. **Orchestrator + CaptureAgent split for multi-SDR.** Includes
    cross-agent dedup + cross-agent library lookup.
 
 ## 17. Open Questions

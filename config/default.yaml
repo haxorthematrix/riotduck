@@ -48,3 +48,8 @@ storage:
   db_path: riotduck.db
   captures_dir: captures
   baselines_dir: baselines
+  # Persistent baselines: skip warmup on restart when a recent
+  # snapshot exists. Snapshots older than max_age_s are ignored.
+  baseline_persist: true
+  baseline_max_age_s: 86400         # 24 hours
+  baseline_save_interval_s: 300     # 5 minutes
