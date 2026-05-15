@@ -254,10 +254,10 @@ def capture(center: float, samp_rate: float, duration: float, serial: str | None
 
 @main.command()
 @click.argument("iq_path", type=click.Path(exists=True))
-@click.option("--samp-rate", "-s", "samp_rate", type=float, required=True,
-              help="Sample rate the capture was recorded at, in Hz.")
+@click.option("--samp-rate", "-s", "samp_rate", type=float, default=None,
+              help="Sample rate in Hz. Auto-loaded from .meta.json sidecar if absent.")
 @click.option("--center", "-f", "center", type=float, default=None,
-              help="Center frequency the capture was tuned to, in Hz (optional hint).")
+              help="Tune-center frequency in Hz. Auto-loaded from sidecar if absent.")
 @click.option("--binary", default=None,
               help="Override rtl_433 binary path; defaults to first on PATH.")
 @click.option("--timeout", "timeout_s", type=float, default=60.0, show_default=True,
@@ -265,22 +265,46 @@ def capture(center: float, samp_rate: float, duration: float, serial: str | None
 @click.option("--json", "json_out", is_flag=True,
               help="Print one JSON object per identification on stdout.")
 @click.pass_context
-def analyze(ctx: click.Context, iq_path: str, samp_rate: float,
+def analyze(ctx: click.Context, iq_path: str, samp_rate: float | None,
             center: float | None, binary: str | None,
             timeout_s: float, json_out: bool) -> None:
     """Offline: run the identification pipeline against an I/Q file.
 
-    Currently runs rtl_433 in file-mode replay. URH and unknown-signal
-    analysis hooks will be added under the same command as they land.
+    riotduck writes a .meta.json sidecar next to every capture; if
+    present, `samp_rate` and `center` come from it automatically.
+    For captures from other tools, supply -s / -f explicitly.
 
     Example:
 
-        riotduck analyze capture.cf32 -s 2400000 -f 433920000
+        riotduck analyze capture.cf32                  # uses sidecar
+        riotduck analyze capture.cf32 -s 2400000       # override SR
     """
     import json as _json
 
     from riotduck.config import IdToolConfig
     from riotduck.fingerprint.rtl_433 import run_on_file
+    from riotduck.storage.files import read_capture_meta
+
+    # Sidecar fallback for samp_rate / center.
+    if samp_rate is None or center is None:
+        meta = read_capture_meta(iq_path)
+        if meta is not None:
+            if samp_rate is None and meta.get("samp_rate"):
+                samp_rate = float(meta["samp_rate"])
+            if center is None and meta.get("capture_center_hz"):
+                center = float(meta["capture_center_hz"])
+            if not json_out:
+                console.print(
+                    f"[dim]loaded from sidecar:[/dim] sr={samp_rate}, "
+                    f"center={center}"
+                )
+
+    if samp_rate is None:
+        console.print(
+            "[red]no sample rate available[/red]: no .meta.json sidecar "
+            "and no --samp-rate / -s flag."
+        )
+        sys.exit(2)
 
     cfg = ctx.obj.get("config_path")
     try:
@@ -404,6 +428,142 @@ def library_list(ctx: click.Context, path: str | None) -> None:
             ", ".join(e.tags) or "-",
         )
     console.print(t)
+
+
+@library.command("add")
+@click.option("--id", "entry_id", required=True, help="Stable identifier (e.g. 'garage-remote').")
+@click.option("--name", default="", help="Human-readable name.")
+@click.option("--notes", default="", help="Free-form notes.")
+@click.option("--tag", "tags", multiple=True, help="Tag (repeatable).")
+@click.option("--from-capture", "from_capture", type=click.Path(exists=True),
+              default=None, help="Pre-fill match fields by analyzing an I/Q capture.")
+@click.option("--samp-rate", "samp_rate", type=float, default=None,
+              help="Sample rate for --from-capture; defaults to sidecar.")
+@click.option("--center", "center_hz", type=float, default=None,
+              help="Tune center for --from-capture; defaults to sidecar.")
+@click.option("--modulation", default=None,
+              help="OOK / FSK / etc. Override analyzer or set manually.")
+@click.option("--bw-hz", "bw_3db_hz", type=float, default=None,
+              help="-3 dB bandwidth in Hz.")
+@click.option("--bw-tolerance-hz", type=float, default=None)
+@click.option("--center-tolerance-hz", type=float, default=None)
+@click.option("--symbol-rate-hz", type=float, default=None)
+@click.option("--symbol-rate-tolerance-hz", type=float, default=None)
+@click.option("--replace", is_flag=True,
+              help="Allow overwriting an existing entry with the same id.")
+@click.option("--path", default=None, help="Library YAML; default from config.")
+@click.pass_context
+def library_add(  # noqa: PLR0913 — CLI surface mirrors the schema
+    ctx: click.Context, entry_id: str, name: str, notes: str,
+    tags: tuple[str, ...], from_capture: str | None,
+    samp_rate: float | None, center_hz: float | None,
+    modulation: str | None, bw_3db_hz: float | None,
+    bw_tolerance_hz: float | None, center_tolerance_hz: float | None,
+    symbol_rate_hz: float | None, symbol_rate_tolerance_hz: float | None,
+    replace: bool, path: str | None,
+) -> None:
+    """Add an entry to the library.
+
+    Two complementary modes:
+
+    \b
+      # From a capture file (analyzer fills in modulation/bw/symbol rate):
+      riotduck library add --from-capture captures/.../abc.cf32 --id remote --name "Garage"
+
+      # Explicit fields only:
+      riotduck library add --id remote --center 433.92e6 --modulation OOK --bw-hz 8000
+    """
+    from riotduck.analysis.classifier import analyze as analyze_iq
+    from riotduck.library import Library, LibraryEntry, LibraryMatch
+    from riotduck.storage.files import read_capture_meta, read_iq_cf32
+
+    if from_capture:
+        if samp_rate is None or center_hz is None:
+            meta = read_capture_meta(from_capture)
+            if meta is not None:
+                if samp_rate is None and meta.get("samp_rate"):
+                    samp_rate = float(meta["samp_rate"])
+                if center_hz is None and meta.get("capture_center_hz"):
+                    center_hz = float(meta["capture_center_hz"])
+        if samp_rate is None:
+            console.print("[red]no sample rate[/red]: provide --samp-rate or a sidecar.")
+            sys.exit(2)
+        if center_hz is None:
+            console.print("[red]no center freq[/red]: provide --center or a sidecar.")
+            sys.exit(2)
+        iq = read_iq_cf32(from_capture)
+        result = analyze_iq(iq, samp_rate)
+        console.print(
+            f"[cyan]analyzer:[/cyan] mod={result.modulation} "
+            f"bw_3db={result.bw_3db_hz} sym={result.symbol_rate_hz}"
+        )
+        # CLI overrides take precedence over analyzer guesses.
+        if modulation is None and result.modulation not in ("unknown", "noise"):
+            modulation = result.modulation
+        if bw_3db_hz is None:
+            bw_3db_hz = result.bw_3db_hz
+        if symbol_rate_hz is None:
+            symbol_rate_hz = result.symbol_rate_hz
+
+    if center_hz is None:
+        console.print("[red]center frequency required[/red] (--center or --from-capture).")
+        sys.exit(2)
+
+    match_kwargs: dict = {"center_hz": center_hz}
+    if center_tolerance_hz is not None:
+        match_kwargs["center_tolerance_hz"] = center_tolerance_hz
+    if modulation:
+        match_kwargs["modulation"] = modulation
+    if bw_3db_hz is not None:
+        match_kwargs["bw_3db_hz"] = bw_3db_hz
+    if bw_tolerance_hz is not None:
+        match_kwargs["bw_3db_tolerance_hz"] = bw_tolerance_hz
+    if symbol_rate_hz is not None:
+        match_kwargs["symbol_rate_hz"] = symbol_rate_hz
+    if symbol_rate_tolerance_hz is not None:
+        match_kwargs["symbol_rate_tolerance_hz"] = symbol_rate_tolerance_hz
+
+    entry = LibraryEntry(
+        id=entry_id, name=name, notes=notes, tags=list(tags),
+        match=LibraryMatch(**match_kwargs),
+    )
+
+    p = _resolve_library_path(ctx, path)
+    lib = Library.load(p)
+    if lib.get(entry_id) is not None:
+        if not replace:
+            console.print(
+                f"[red]entry {entry_id!r} already exists[/red] in {p}. "
+                "Use --replace to overwrite."
+            )
+            sys.exit(1)
+        lib.entries = [e for e in lib.entries if e.id != entry_id]
+    lib.entries.append(entry)
+    lib._by_id[entry_id] = entry
+    lib.save(p)
+
+    console.print(f"[green]added[/green] [bold]{entry_id}[/bold] → {p}")
+    m = entry.match
+    console.print(f"  center={m.center_hz/1e6:.6f} MHz  mod={m.modulation or '-'}  "
+                  f"bw={m.bw_3db_hz}  sym={m.symbol_rate_hz}")
+
+
+@library.command("remove")
+@click.argument("entry_id")
+@click.option("--path", default=None, help="Library YAML; default from config.")
+@click.pass_context
+def library_remove(ctx: click.Context, entry_id: str, path: str | None) -> None:
+    """Remove an entry by id."""
+    from riotduck.library import Library
+    p = _resolve_library_path(ctx, path)
+    lib = Library.load(p)
+    if lib.get(entry_id) is None:
+        console.print(f"[red]no entry with id {entry_id!r}[/red] in {p}")
+        sys.exit(1)
+    lib.entries = [e for e in lib.entries if e.id != entry_id]
+    lib._by_id.pop(entry_id, None)
+    lib.save(p)
+    console.print(f"[yellow]removed[/yellow] {entry_id} from {p}")
 
 
 @library.command("show")

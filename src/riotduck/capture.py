@@ -25,7 +25,7 @@ from loguru import logger
 
 from riotduck.events import CaptureResult, Detection
 from riotduck.sdr.base import SDRSession
-from riotduck.storage.files import capture_path, write_iq_cf32
+from riotduck.storage.files import capture_path, write_capture_meta, write_iq_cf32
 
 if TYPE_CHECKING:
     from riotduck.scanner import TuneCapture
@@ -49,6 +49,13 @@ def capture_from_buffer(
     path = capture_path(captures_dir, detection.id, detection.ts)
     n_written = write_iq_cf32(path, tune.iq)
     duration_s = n_written / tune.samp_rate if tune.samp_rate > 0 else 0.0
+    write_capture_meta(
+        path,
+        detection=detection,
+        samp_rate=tune.samp_rate,
+        capture_center_hz=tune.center_hz,
+        duration_s=duration_s,
+    )
     logger.info(
         "capture (buffered): {} samples ({:.3f} s @ {:.3f} MS/s, tune={:.4f} MHz) → {}",
         n_written,
@@ -110,6 +117,13 @@ def capture_for_detection(
     path = capture_path(captures_dir, detection.id, detection.ts)
     n_written = write_iq_cf32(path, iq)
     duration_s = n_written / sr_actual if sr_actual > 0 else 0.0
+    write_capture_meta(
+        path,
+        detection=detection,
+        samp_rate=sr_actual,
+        capture_center_hz=detection.center_hz,
+        duration_s=duration_s,
+    )
     logger.info(
         "capture: {} samples ({:.3f} s @ {:.3f} MS/s) → {}",
         n_written,
