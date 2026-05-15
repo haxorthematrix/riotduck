@@ -62,25 +62,33 @@ class NotificationSink(ABC):
     async def deliver(self, topic: str, payload: Any) -> None: ...
 
     async def run(self, bus: EventBus) -> None:
-        # Subscribe to "everything that looks like an event"; specific
-        # filtering happens in _passes_filter.
+        # One long-lived drain task per subscription. The previous
+        # implementation spawned fresh queue.get() tasks each loop
+        # iteration and only awaited the first to complete; tasks
+        # from earlier iterations were orphaned but kept consuming
+        # from the queue, silently dropping messages whose result was
+        # never observed.
         async with bus.subscribe("detection.*") as detsub, \
                    bus.subscribe("identification") as idsub, \
                    bus.subscribe("analysis.report") as ansub:
-            queues = [detsub.queue, idsub.queue, ansub.queue]
-            while True:
-                done, _ = await asyncio.wait(
-                    [asyncio.create_task(q.get()) for q in queues],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in done:
-                    topic, payload = t.result()
+            async def _drain(sub) -> None:
+                while True:
+                    topic, payload = await sub.queue.get()
                     if not self._passes_filter(topic, payload):
                         continue
                     try:
                         await self.deliver(topic, payload)
                     except Exception as e:
                         logger.exception("sink {} deliver failed: {}", self.name, e)
+
+            tasks = [asyncio.create_task(_drain(s)) for s in (detsub, idsub, ansub)]
+            try:
+                await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                for t in tasks:
+                    t.cancel()
 
 
 class StdoutSink(NotificationSink):
