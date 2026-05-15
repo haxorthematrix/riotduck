@@ -1,45 +1,71 @@
 # riotduck — RF Anomaly Detection System
 
-**Status:** v0.1 — Phases 1 and 2 complete (pre-hardware); Phase 3+ open.
+**Status:** v0.1 — Phases 1, 2, and the start of Phase 4 in. Validated on
+real RTL-SDR hardware end-to-end.
 **Owner:** Larry
-**Date:** 2026-05-13
+**Date:** 2026-05-14
 
 ### At a glance
 
 What works today:
 
-- Sweep-scan over user-defined or predefined ranges (RTL-SDR via
-  SoapySDR or pyrtlsdr; HackRF via SoapySDR).
+- Sweep-scan over user-defined or predefined ranges. **RTL-SDR
+  validated on hardware** via pyrtlsdr (Realtek RTL2832U + R820T
+  tuner); HackRF streaming path is in via SoapySDR but not yet
+  hardware-tested.
 - Per-bin rolling baseline (median/MAD) with global P10 noise floor.
 - Appearance + disappearance detection with hysteresis, coalescing,
   and a re-observation/dedup tracker that folds repeat bursts into
   one logical event.
-- Inline I/Q capture on appearance (`.cf32` files, day-partitioned).
+- **Pre-detection ring buffer**: the I/Q that produced the FFT spike
+  is preserved in memory and written to disk on detection, instead of
+  retuning and re-reading. Captures contain the actual burst, not
+  post-burst noise.
+- I/Q captures written as `.cf32`, day-partitioned under
+  `captures/YYYY-MM-DD/<detection_id>.cf32`.
 - rtl_433 fingerprint pipeline: subprocess wrapper, async
   FingerprintAgent, identification events on the bus.
-- Notification sinks: stdout, JSONL, webhook.
+- **Unknown-signal analyzer agent**: when rtl_433 returns "no
+  match", the analyzer characterizes the signal — burst
+  segmentation, bandwidth at -3/-6/-20 dB, modulation classification
+  (CW / OOK / FSK / FM), symbol-rate via edge-spacing. Publishes
+  `AnalysisReport` on the bus.
+- Notification sinks: stdout, JSONL, webhook. Single-drain-per-
+  subscription pattern (a bug where `identification` events were
+  being silently dropped was caught + fixed).
 - Synthetic SDR backend with configurable emitters — the full
   pipeline runs end-to-end without hardware.
 - CLI: `scan`, `devices`, `ranges`, `doctor`, `capture`, `analyze`.
+- 65 unit tests, all passing, no hardware required.
 
 What's deferred:
 
-- HackRF `hackrf_sweep` fast path and tested-on-hardware HackRF
+- HackRF `hackrf_sweep` fast path and hardware-tested HackRF
   streaming (Phase 3).
-- URH integration — wired through config but the demod call is a stub
-  (Phase 3).
+- URH integration — wired through config but the demod call is a
+  stub (Phase 3).
 - Multi-SDR orchestration with dedicated CaptureAgent and dynamic
   device reassignment (Phase 4). Today, one ScannerAgent per device
   sweeps every range and captures inline; dedup is per-agent.
-- Unknown-signal modulation classifier and symbol-rate estimator
-  (Phase 4).
 - SQLite event store (JSONL sink covers durable logging).
 - Persistent baselines across restarts.
 - Web dashboard (Phase 5).
 
-The first real-hardware validation step is plugging in an RTL-SDR
-and running `riotduck doctor`; everything below the SoapySDR layer is
-already exercised by unit tests against synthesized I/Q.
+### Verified against a real unknown emitter
+
+A continuous 433.92 MHz transmitter that rtl_433 (both the 2021
+build and 2025.12) cannot decode produced this pipeline output:
+
+```
+[detection.appearance]   ^ ism_433 @ 433.9080 MHz bw=8.0 kHz snr=31.1 dB id=3f0094b2 ...
+[identification]         ?? no rtl_433 match det=3f0094b2
+[analysis.report]        >> analysis: mod=OOK bw_3dB=937 Hz sym_rate=6497 Hz det=3f0094b2
+```
+
+The analyzer correctly identifies it as OOK modulation, ~6.5 kbit/s
+symbol rate, ~940 Hz carrier bandwidth, ~50 kHz offset from the
+sweep's tune center. That's enough to feed straight into URH or a
+custom decoder.
 
 ## 1. Overview
 
@@ -449,25 +475,44 @@ pipeline still advances to deeper analysis.
 
 ## 8. Unknown Signal Analysis
 
-When fingerprinting fails or returns low confidence, an extended
-analysis runs on the captured I/Q:
+When fingerprinting fails (rtl_433 produces no match), the
+AnalysisAgent picks up the capture and runs a heuristic pipeline in
+`analysis/classifier.py`:
 
-- **Modulation classification** — heuristic + cumulant-based:
-  - Constant envelope → likely FM/FSK/PSK
-  - Bimodal envelope → likely OOK/ASK
-  - Higher-order cumulants (C20, C40, C41, C42) to discriminate
-    PSK orders. Pragmatic, not research-grade.
-- **Symbol rate estimation** — cyclostationary feature detection (FFT
-  of squared/cubed signal), or autocorrelation of envelope.
-- **Bandwidth refinement** — fit a power-vs-frequency profile to the
-  capture and report -3 dB / -6 dB / -20 dB bandwidths.
-- **Re-observation request** — if classification is ambiguous, request
-  longer captures next time the emitter appears, up to a configurable
-  ceiling per emitter.
-- **Artifacts** written: classification report (JSON), demodulated bit
-  stream if recovered (binary), spectrogram PNG, raw I/Q (.cf32).
+- **Burst segmentation** — smoothed-envelope thresholding. Bursts
+  shorter than `min_duration_ms` are dropped; bursts separated by
+  ≤ `merge_gap_ms` of silence are merged. Continuous emitters
+  return a single full-capture "burst".
+- **Bandwidth refinement** — windowed FFT of the longest burst,
+  power-vs-frequency profile, report `bw_3db_hz`, `bw_6db_hz`,
+  `bw_20db_hz`. DC ±5 kHz is masked to suppress the RTL-SDR's
+  center spur from biasing the measurement.
+- **Frequency offset** — coarse offset = location of the FFT peak
+  from tune center, useful for FSK and for confirming the emitter
+  isn't a spur sitting near the tune.
+- **Modulation classification** — heuristic:
+  - Narrow occupied bandwidth + low envelope coefficient-of-
+    variation → **CW** (carrier-only).
+  - High envelope CV (≥ 0.6) → **OOK / ASK** (bimodal envelope).
+  - Low envelope CV + multimodal instantaneous-frequency histogram
+    → **FSK**.
+  - Low envelope CV + smooth IF spread → **FM**.
+  - Otherwise → **unknown**.
+  Higher-order-cumulant PSK distinguishing is on the roadmap but
+  not in v0.1.
+- **Symbol rate estimation** — envelope edge-spacing 25th percentile.
+  Smooth the envelope, threshold at midpoint, detect rising/falling
+  edges, take the 25th percentile of inter-edge intervals as the
+  symbol period. This works on random NRZ patterns where the
+  spectral-line / cyclostationary approach finds no clear peak.
+- **Re-observation request** — not yet wired. (Future: ask the
+  scanner to extend the next capture for an ambiguous emitter.)
+- **Artifacts** — currently the raw `.cf32` capture is the only
+  artifact preserved. Spectrogram PNG, demodulated bit-stream, and
+  a JSON classification report are future work.
 
-Output: `AnalysisReport` event referencing the originating detection.
+Output: `AnalysisReport` event referencing the originating detection
+id, picked up by all notification sinks.
 
 ## 9. Agent Model
 
@@ -642,27 +687,44 @@ Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
 - Notification sinks: stdout, JSONL, webhook. ✅
 - CLI: `scan`, `devices`, `ranges`, `doctor`, `capture`. ✅
 
-### Phase 2 — Identification ✅ complete (pre-hardware)
+### Phase 2 — Identification ✅ complete
 - Inline I/Q capture on appearance (cf32, day-partitioned). ✅
+- Pre-detection ring buffer: capture from in-memory sweep I/Q so
+  the burst is actually in the file. ✅
 - rtl_433 subprocess integration + JSON parsing. ✅
 - FingerprintAgent on the bus emitting Identification events. ✅
 - Offline `riotduck analyze <file>` against the same pipeline. ✅
+- Validated end-to-end on a real RTL-SDR + a 433.92 MHz transmitter. ✅
 - SQLite event tables: deferred — JSONL is the durable log for now.
 
+### Phase 4 (early) — Unknown-signal analysis ✅ in
+- AnalysisAgent subscribes to rtl_433 misses. ✅
+- Burst segmentation (envelope thresholding, smoothing, merging). ✅
+- Bandwidth measurement at -3/-6/-20 dB with DC mask. ✅
+- Modulation classification: CW / OOK / FSK / FM / unknown. ✅
+- Symbol-rate estimation via envelope edge-spacing (works on
+  random NRZ where cyclostationary approaches fail). ✅
+- AnalysisReport published on the bus, picked up by all
+  notification sinks. ✅
+- Validated against a real transmitter whose protocol rtl_433
+  doesn't decode: correctly reported OOK, ~6.5 kbit/s, ~940 Hz
+  carrier BW, ~50 kHz freq offset. ✅
+
 ### Phase 3 — HackRF fast path + URH
-- HackRF SoapySDR streaming validated on real hardware (currently
-  only exercised through SoapySDR's abstraction; no rig tested).
+- HackRF SoapySDR streaming validated on real hardware (path
+  exists; no rig tested yet).
 - `hackrf_sweep` subprocess parser as the fast path for ranges
   > 100 MHz wide.
 - URH demod integration (confirm `urh_cli` vs URH-NG surface first).
 - Live-mode rtl_433 as an alternative to file-mode replay.
 
-### Phase 4 — Multi-SDR orchestration
-- Dedicated CaptureAgent under Orchestrator with device role/role
+### Phase 4 (rest) — Multi-SDR orchestration
+- Dedicated CaptureAgent under Orchestrator with device role
   assignment policy (§10) and dynamic reassignment on detection.
-- Cross-agent dedup (currently per-agent; multi-SDR with overlapping
-  ranges can publish duplicates).
-- Unknown-signal modulation classifier + symbol-rate estimator (§8).
+- Cross-agent dedup (currently per-agent; multi-SDR with
+  overlapping ranges can publish duplicates).
+- PSK distinguishing in the classifier (currently coarsely lumped
+  under "unknown" or "FSK").
 - Persistent baselines across restarts.
 
 ### Phase 5 — Polish
@@ -671,25 +733,54 @@ Global flags: `--config`, `--log-level`, `--db`, `--captures-dir`.
 - Additional sinks: MQTT, Slack, email, syslog.
 - `riotduck replay` for offline detection tuning against a recorded
   baseline.
+- Sidecar `.meta.json` next to each `.cf32` so offline `analyze`
+  / `replay` doesn't need to guess sample rate or center.
 
-## 16a. Immediate Next Steps
+## 16a. Real-hardware findings + next steps
 
-Roughly the order I'd tackle them when hardware shows up:
+Things uncovered by the first RTL-SDR runs that informed v0.1.1:
 
-1. Plug in an RTL-SDR. Run `riotduck doctor`, then `riotduck devices`
-   to confirm SoapySDR/pyrtlsdr discovery works end-to-end on the
-   user's host.
-2. Run `riotduck scan` against a wide range and tune detection
-   parameters (`k_up`, `window_size`, `min_freq_tolerance_hz`) against
-   the local spectral environment.
-3. Build a small regression corpus from rtl_433's test files and run
-   `riotduck analyze` against each, asserting expected device classes.
-4. HackRF integration: validate streaming, then implement the
-   `hackrf_sweep` subprocess parser.
-5. Persistent baselines (snapshot exists; just needs save/load wiring
-   in the runner).
-6. URH demod once the URH-NG CLI surface is confirmed.
-7. Orchestrator + CaptureAgent split for multi-SDR.
+1. **pyrtlsdr 0.4 / librtlsdr 2.x mismatch.** Stock Osmocom
+   librtlsdr 2.0.2 doesn't export `rtlsdr_set_dithering` which
+   pyrtlsdr 0.4.0 imports at module load. Pinned `pyrtlsdr>=0.3,<0.4`
+   in the `rtlsdr` extra.
+2. **setuptools 81 drops `pkg_resources`.** pyrtlsdr 0.3.x still
+   uses it. Pinned `setuptools<81` in the `rtlsdr` extra.
+3. **LIBUSB_ERROR_OVERFLOW on unaligned trailing reads.** pyrtlsdr's
+   `read_samples` does no internal chunking. The session wrapper now
+   always reads aligned `131_072`-sample chunks and trims.
+4. **NotificationSink was dropping identification events.** The old
+   loop created fresh queue waiter tasks each iteration and only
+   awaited the first to complete; orphaned waiters consumed events
+   that were never observed. Now one drain task per subscription.
+5. **Post-detection capture was missing the burst.** A short burst
+   ends before the SDR finishes retuning. The Scanner now retains
+   the sweep's tune I/Q so the agent dumps the same samples that
+   produced the FFT spike — burst contents preserved.
+6. **rtl_433 from April 2021 was on `$PATH`** (shadowing brew's
+   2025.12). Spec assumption that whatever's on PATH is current is
+   wrong; `riotduck doctor` should grow a version check.
+
+What I'd tackle next, in rough order:
+
+1. **`riotduck doctor` rtl_433 version check.** Parse `-V`, warn on
+   anything older than 22.x (when many decoders were added) and on
+   binaries shadowed by older copies earlier in PATH.
+2. **Capture sidecar metadata.** Write `<id>.meta.json` next to each
+   `.cf32` with samp_rate / center_hz / device / antenna / config
+   snapshot. Today the AnalysisAgent receives this via the
+   Identification's `_capture` dict; offline `analyze` and `replay`
+   need it on disk.
+3. **HackRF on real hardware.** Validate streaming, implement the
+   `hackrf_sweep` subprocess parser for wide ranges.
+4. **PSK distinguishing in the classifier.** Add a phase-jump
+   detector for BPSK/QPSK so we don't lump them under "unknown" or
+   "FSK".
+5. **URH demod once the URH-NG CLI surface is confirmed.**
+6. **Persistent baselines.** `BaselineEngine.snapshot()` already
+   produces the npz blob; need save/load + max-age policy in the
+   runner.
+7. **Orchestrator + CaptureAgent split for multi-SDR.**
 
 ## 17. Open Questions
 

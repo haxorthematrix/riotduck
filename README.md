@@ -20,10 +20,25 @@ current status.
 
 ## Status
 
-v0.1 — Phases 1 and 2 are complete and unit-tested against
-synthesized I/Q. Real-hardware validation is the next milestone.
-46 unit tests; `pytest -q` runs in ~2 s. Try it now without an SDR:
+v0.1 — Phases 1, 2, and the start of Phase 4 are in. **Validated on
+real RTL-SDR hardware** end-to-end: sweep → baseline → dedup →
+capture → fingerprint → unknown-signal analysis. 65 unit tests;
+`pytest -q` runs in ~3 s.
 
+What works today:
+- RTL-SDR streaming (via SoapySDR or pyrtlsdr; HackRF via SoapySDR
+  not yet hardware-tested but the streaming path is in)
+- Per-bin rolling-baseline detection of appearance + disappearance,
+  with hysteresis and dedup
+- Pre-detection ring buffer — captures contain the actual burst
+  samples, not 400 ms of post-burst noise
+- rtl_433 fingerprinting via the FingerprintAgent
+- Unknown-signal analyzer agent: burst segmentation, bandwidth at
+  -3/-6/-20 dB, modulation classification (CW/OOK/FSK/FM),
+  symbol-rate via edge-spacing
+- Synthetic SDR backend for hardware-free demos and tests
+
+Try it without an SDR:
 ```bash
 pip install -e .
 riotduck scan --fake 1 --config config/default.yaml
@@ -137,6 +152,22 @@ riotduck analyze capture.cf32 -s 2400000 --json    # one JSON per hit
 
 Exit code is 2 if rtl_433 isn't on `$PATH` (override with `--binary`).
 
+## What you see on a live unknown signal
+
+In a real run against an unknown 433.92 MHz transmitter that rtl_433
+couldn't decode, riotduck produces:
+
+```
+[detection.appearance]   ^ ism_433 @ 433.9080 MHz bw=8.0 kHz snr=31.1 dB id=3f0094b2 iq=captures/.../3f0094b2....cf32
+[identification]         ?? no rtl_433 match det=3f0094b2
+[analysis.report]        >> analysis: mod=OOK bw_3dB=937 Hz sym_rate=6497 Hz det=3f0094b2
+```
+
+That last line is the analyzer agent characterizing what rtl_433
+couldn't. From the detection + analysis you know: OOK modulation,
+~6.5 kbit/s, ~940 Hz of carrier bandwidth, 50 kHz off your tune
+center. Enough to feed straight into URH or write a custom decoder.
+
 ## Configuration
 
 YAML, schema documented in `specification.md` §13. Common knobs:
@@ -204,9 +235,13 @@ ruff check src/                            # lint
 
 The tests cover config loading, FFT/DSP correctness, the detection
 state machine, the dedup tracker, the rtl_433 wrapper (mocked
-subprocess), the analyze CLI, the fingerprint agent, the inline
-capture step, and the synthetic SDR backend. They do not require any
-SDR hardware or the `rtl_433` binary.
+subprocess), the analyze CLI, the fingerprint and analysis agents,
+the buffered-capture path, the notification sink (regression against
+a real bug where identifications were silently dropped), the
+classifier (burst segmentation, bandwidth, modulation, symbol rate
+on synthesized known-modulation signals), and the synthetic SDR
+backend. They do not require any SDR hardware or the `rtl_433`
+binary.
 
 ## Layout
 
@@ -230,19 +265,21 @@ src/riotduck/
     manager.py         # discovery + reservation
   agents/
     base.py            # async Agent lifecycle
-    scanner_agent.py   # one per scanning SDR
+    scanner_agent.py   # one per scanning SDR (capture-on-detect)
     fingerprint_agent.py
+    analysis_agent.py  # runs on rtl_433 misses
   notify/              # stdout / jsonl / webhook sinks
   fingerprint/         # rtl_433 wrapper, URH stub
   storage/             # cf32 capture file layout
-  analysis/            # unknown-signal classifier (Phase 4 stub)
+  analysis/
+    classifier.py      # burst seg + BW + modulation + symbol rate
 config/
   default.yaml         # default user config
   ism_bands.yaml       # predefined range library (18 bands)
   fake_profile.yaml    # sample synthetic emitter profile
 etc/udev/rules.d/
   99-riotduck.rules    # Linux device permissions
-tests/                 # 46 unit tests, no hardware required
+tests/                 # 65 unit tests, no hardware required
 ```
 
 ## Legal note
